@@ -4,4 +4,5 @@ pandas
 ortools
 numpy
 geopandas
-
+osmnx
+shapely
