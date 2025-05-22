@@ -2,175 +2,162 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import osmnx as ox
-import networkx as nx
 import geopandas as gpd
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import tempfile
 import os
 import numpy as np
 
-def create_map(center=[34.2832, 133.1831], zoom=13):
-    """地図を初期化"""
-    return folium.Map(location=center, zoom_start=zoom)
+ox.config(log_console=True, use_cache=True)
 
-def add_shelter(map_obj, shelters):
-    """避難所をマップに追加"""
+# 初期設定
+def initialize():
+    if "shelters" not in st.session_state:
+        st.session_state["shelters"] = []
+    if "route" not in st.session_state:
+        st.session_state["route"] = []
+    if "calculated" not in st.session_state:
+        st.session_state["calculated"] = False
+
+# マップ生成
+def create_map():
+    return folium.Map(location=[34.2832, 133.1831], zoom_start=13)
+
+# 避難所表示
+def display_shelters(map_obj, shelters):
     for shelter in shelters:
         folium.Marker(
-            location=[shelter["lat"], shelter["lon"]],
-            popup=shelter["name"]
+            [shelter["lat"], shelter["lon"]],
+            popup=shelter["name"],
+            icon=folium.Icon(color="blue", icon="info-sign")
         ).add_to(map_obj)
 
+# データ読み込み
 def load_shelters(files):
-    """SHP関連ファイルから避難所データを読み込む"""
     with tempfile.TemporaryDirectory() as temp_dir:
         for file in files:
             file_path = os.path.join(temp_dir, file.name)
             with open(file_path, "wb") as f:
                 f.write(file.getvalue())
-        shp_path = next(os.path.join(temp_dir, file.name) for file in files if file.name.endswith('.shp'))
-        gdf = gpd.read_file(shp_path)
-        return [
-            {
-                "lat": row.geometry.y,
-                "lon": row.geometry.x,
-                "name": row.get("name", "Unnamed Shelter")
-            }
-            for _, row in gdf.iterrows()
+        shp_file = next(f for f in files if f.name.endswith('.shp'))
+        gdf = gpd.read_file(os.path.join(temp_dir, shp_file.name))
+        shelters = [
+            {"lat": geom.y, "lon": geom.x, "name": row.get("name", "避難所")}
+            for geom, row in zip(gdf.geometry, gdf.to_dict('records'))
         ]
+    return shelters
 
-# ─────────────────────────────────────────────────────────────
-# ★ 修正箇所：OSMnxバージョンに合わせて「位置引数のみ」を使う
-# ─────────────────────────────────────────────────────────────
-def get_network_from_shelters(shelters, mode="walking"):
-    """避難所の範囲を考慮してネットワークを取得（OSMnx 0.x 向け位置引数形式）"""
-    mode_type = {"walking": "walk", "bicycle": "bike", "car": "drive"}[mode]
-
-    # 緯度と経度の範囲を計算
+# ネットワーク取得（広めに確保）
+@st.cache_data
+def get_network(shelters, mode):
     lats = [s["lat"] for s in shelters]
     lons = [s["lon"] for s in shelters]
-    north, south, east, west = max(lats), min(lats), max(lons), min(lons)
-
-    # 位置引数のみを使用 (古いバージョンでエラーにならない形)
-    G = ox.graph_from_bbox(north, south, east, west, network_type=mode_type)
+    padding = 0.005
+    G = ox.graph_from_bbox(
+        north=max(lats)+padding, south=min(lats)-padding,
+        east=max(lons)+padding, west=min(lons)-padding,
+        network_type=mode
+    )
     return G
 
-def calculate_route_osm(shelters, mode="walking"):
-    """OSMネットワークを利用して最短経路を計算"""
-    G = get_network_from_shelters(shelters, mode)
-    nodes = [ox.nearest_nodes(G, shelter["lon"], shelter["lat"]) for shelter in shelters]
-
-    num_nodes = len(nodes)
-    distance_matrix = np.zeros((num_nodes, num_nodes))
-    for i in range(num_nodes):
-        for j in range(num_nodes):
+# 距離行列作成（堅牢に）
+def create_distance_matrix(G, shelters):
+    nodes = [ox.nearest_nodes(G, s["lon"], s["lat"]) for s in shelters]
+    n = len(nodes)
+    dist_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
             if i != j:
                 try:
-                    distance = nx.shortest_path_length(
-                        G, source=nodes[i], target=nodes[j], weight="length"
-                    )
-                    distance_matrix[i][j] = distance
-                except nx.NetworkXNoPath:
-                    distance_matrix[i][j] = float("inf")
+                    dist = nx.shortest_path_length(G, nodes[i], nodes[j], weight='length')
+                except Exception:
+                    dist = float('inf')
+                dist_matrix[i][j] = dist
+    return dist_matrix, nodes
 
-    path, total_distance = solve_tsp_with_network(distance_matrix)
-    return path, total_distance, G, nodes
+# OR-ToolsでTSP解決（高精度）
+def solve_tsp(distance_matrix):
+    manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
 
-def solve_tsp_with_network(distance_matrix):
-    from scipy.optimize import linear_sum_assignment
-    num_nodes = distance_matrix.shape[0]
-    cost_matrix = distance_matrix.copy()
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    path = list(row_ind) + [row_ind[0]]  # 巡回経路を閉じる
-    total_distance = sum(cost_matrix[row_ind[i], col_ind[i]] for i in range(len(row_ind)))
-    return path, total_distance
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return int(distance_matrix[from_node][to_node])
 
-def initialize_session_state():
-    if "shelters" not in st.session_state:
-        st.session_state.shelters = []
-    if "route" not in st.session_state:
-        st.session_state.route = []
-    if "route_calculated" not in st.session_state:
-        st.session_state.route_calculated = False
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+    
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
 
+    solution = routing.SolveWithParameters(search_parameters)
+    route = []
+    if solution:
+        index = routing.Start(0)
+        while not routing.IsEnd(index):
+            node_index = manager.IndexToNode(index)
+            route.append(node_index)
+            index = solution.Value(routing.NextVar(index))
+        route.append(route[0])  # return to start
+    return route
+
+# Streamlit UI構成
 def main():
-    st.set_page_config(page_title="避難所セールスマン問題解決アプリ", layout="wide")
-    initialize_session_state()
+    st.set_page_config(layout="wide", page_title="避難所巡回ルート最適化アプリ")
+    initialize()
 
-    st.title("避難所セールスマン問題解決アプリ（修正版）")
+    st.title("🗺️ 避難所巡回ルート最適化アプリ")
 
-    st.sidebar.header("操作メニュー")
-    action = st.sidebar.radio(
-        "操作を選択してください：",
-        options=["地図を表示", "データをアップロード", "手動で避難所を追加"],
-    )
+    tabs = st.tabs(["📍 地図表示", "📂 データアップロード", "➕ 避難所追加", "🚴 ルート計算"])
 
-    # 開始ボタン
-    if st.sidebar.button("開始ボタン"):
-        if len(st.session_state.shelters) < 2:
-            st.sidebar.error("避難所が2つ以上必要です。")
-        else:
-            mode = st.sidebar.radio(
-                "移動手段を選択してください",
-                options=["walking", "bicycle", "car"],
-                format_func=lambda x: {"walking": "徒歩", "bicycle": "自転車", "car": "自動車"}[x]
-            )
-            try:
-                path, total_distance, G, nodes = calculate_route_osm(st.session_state.shelters, mode)
-                # (lat, lon)形式に変換
-                st.session_state.route = [
-                    (G.nodes[nodes[i]]["y"], G.nodes[nodes[i]]["x"]) for i in path
-                ]
-                st.session_state.route_calculated = True
-                st.sidebar.success(f"ルート計算が完了しました！総距離: {total_distance / 1000:.2f} km")
-            except Exception as e:
-                st.sidebar.error(f"エラーが発生しました: {e}")
-
-    # 地図を表示
-    if action == "地図を表示":
-        st.header("地図を表示")
+    # 地図表示
+    with tabs[0]:
         map_obj = create_map()
-        add_shelter(map_obj, st.session_state.shelters)
-        if st.session_state.route_calculated:
-            for i in range(len(st.session_state.route) - 1):
-                folium.PolyLine(
-                    locations=[
-                        (st.session_state.route[i][0], st.session_state.route[i][1]),
-                        (st.session_state.route[i + 1][0], st.session_state.route[i + 1][1]),
-                    ],
-                    color="red",
-                    weight=2.5,
-                    opacity=0.8,
-                ).add_to(map_obj)
-        st_folium(map_obj, width=800, height=600)
+        display_shelters(map_obj, st.session_state["shelters"])
+        if st.session_state["calculated"]:
+            route_coords = [
+                (st.session_state["shelters"][i]["lat"], st.session_state["shelters"][i]["lon"])
+                for i in st.session_state["route"]
+            ]
+            folium.PolyLine(route_coords, color="red", weight=3).add_to(map_obj)
+        st_folium(map_obj, width=800, height=500)
 
-    elif action == "データをアップロード":
-        st.header("避難所データのアップロード")
-        uploaded_files = st.file_uploader(
-            "SHPファイルをアップロード", 
-            type=["shp", "shx", "dbf", "prj"],
-            accept_multiple_files=True
-        )
-        if st.button("データを読み込む"):
-            if uploaded_files:
-                shelters = load_shelters(uploaded_files)
-                st.session_state.shelters.extend(shelters)
-                st.success(f"{len(shelters)} 件の避難所が追加されました！")
+    # データアップロード
+    with tabs[1]:
+        files = st.file_uploader("避難所データ（SHP）をアップロードしてください", accept_multiple_files=True, type=["shp","shx","dbf","prj"])
+        if st.button("データ読込"):
+            if files:
+                shelters = load_shelters(files)
+                st.session_state["shelters"].extend(shelters)
+                st.success(f"{len(shelters)}件の避難所を追加しました。")
             else:
                 st.error("ファイルをアップロードしてください。")
 
-    elif action == "手動で避難所を追加":
-        st.header("避難所の手動追加")
-        lat = st.text_input("緯度を入力", value="34.2832")
-        lon = st.text_input("経度を入力", value="133.1831")
-        name = st.text_input("避難所名", value="新しい避難所")
+    # 手動追加
+    with tabs[2]:
+        lat = st.number_input("緯度", value=34.2832, format="%f")
+        lon = st.number_input("経度", value=133.1831, format="%f")
+        name = st.text_input("避難所名", "新規避難所")
         if st.button("避難所を追加"):
-            try:
-                lat = float(lat)
-                lon = float(lon)
-                st.session_state.shelters.append({"lat": lat, "lon": lon, "name": name})
-                st.success(f"避難所 '{name}' を追加しました！")
-            except ValueError:
-                st.error("緯度または経度の入力が正しくありません。数値を入力してください。")
+            st.session_state["shelters"].append({"lat": lat, "lon": lon, "name": name})
+            st.success("避難所を追加しました。")
+
+    # TSP計算
+    with tabs[3]:
+        mode = st.selectbox("移動手段", ["walk", "bike", "drive"], format_func=lambda x: {"walk":"徒歩","bike":"自転車","drive":"自動車"}[x])
+        if st.button("ルート計算"):
+            if len(st.session_state["shelters"]) < 2:
+                st.error("最低2つの避難所が必要です。")
+            else:
+                with st.spinner("計算中…"):
+                    G = get_network(st.session_state["shelters"], mode)
+                    dist_matrix, nodes = create_distance_matrix(G, st.session_state["shelters"])
+                    route = solve_tsp(dist_matrix)
+                    st.session_state["route"] = route
+                    st.session_state["calculated"] = True
+                    route_length = sum(dist_matrix[route[i]][route[i+1]] for i in range(len(route)-1))
+                    st.success(f"ルート計算完了（総距離: {route_length/1000:.2f} km）")
 
 if __name__ == "__main__":
     main()
