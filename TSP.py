@@ -8,8 +8,8 @@ import os
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
-st.set_page_config(page_title="避難所TSPルート（ラベル＆座標厳密版）", layout="wide")
-st.title("🏫 避難所TSPルートアプリ（ラベル・座標厳密対応・上島町役場中心）")
+st.set_page_config(page_title="避難所TSPルート（EPSG対応・ラベル付き）", layout="wide")
+st.title("🏫 避難所TSPルートアプリ（EPSG自動対応・ラベル付き・上島町役場中心）")
 
 def guess_name_col(df):
     for cand in ["name", "NAME", "名称", "避難所", "施設名"]:
@@ -44,6 +44,21 @@ def file_to_df(uploaded_files):
     else:
         st.warning("SHP/GeoJSON/CSVのみ対応です")
         return pd.DataFrame(columns=["lat", "lon", "name"])
+
+    # EPSG自動変換
+    crs_was_set = False
+    if gdf.crs is None:
+        st.warning("座標系情報がありません。EPSG:4326として扱います。")
+        gdf.set_crs(epsg=4326, inplace=True)
+        crs_was_set = True
+    elif gdf.crs.to_epsg() != 4326:
+        st.info(f"座標系が {gdf.crs} → EPSG:4326 に自動変換します")
+        gdf = gdf.to_crs(epsg=4326)
+        crs_was_set = True
+
+    # (確認用)CRSを表示
+    if crs_was_set:
+        st.write(f"現在のCRS: {gdf.crs}")
 
     # Point型の座標順序に明示的に対応
     if gdf.geometry.iloc[0].geom_type != "Point":
@@ -172,7 +187,6 @@ if st.button("選択避難所でTSP最短巡回ルート計算"):
 df = shelters_df
 route = st.session_state["route"]
 
-# -------------------- pydeck: ラベルも表示 -------------------
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
     data=df,
