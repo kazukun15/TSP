@@ -7,12 +7,13 @@ import tempfile
 import os
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-st.set_page_config(page_title="避難所TSP選択ルートアプリ", layout="wide")
-st.title("🏫 避難所TSPルートアプリ（地図表示堅牢版）")
+# 上島町役場の座標
+KAMIJIMA_CENTER = (34.2224, 133.2005)
 
-# ---------------------------------------
-# 共通関数
-# ---------------------------------------
+st.set_page_config(page_title="避難所TSPルート（上島町役場中心）", layout="wide")
+st.title("🏫 避難所TSPルートアプリ（中心：上島町役場）")
+
+# --------------- 共通関数 ---------------
 def guess_name_col(df):
     for cand in ["name", "NAME", "名称", "避難所", "施設名"]:
         if cand in df.columns:
@@ -20,7 +21,6 @@ def guess_name_col(df):
     return df.columns[0]
 
 def file_to_df(uploaded_files):
-    # 複数ファイルまとめて扱う
     if any(f.name.endswith(".shp") for f in uploaded_files):
         with tempfile.TemporaryDirectory() as temp_dir:
             for file in uploaded_files:
@@ -35,7 +35,9 @@ def file_to_df(uploaded_files):
                 st.warning("Point以外は非対応です")
                 return pd.DataFrame(columns=["lat", "lon", "name"])
             name_col = guess_name_col(gdf)
-            return gdf[["lat","lon",name_col]].rename(columns={name_col: "name"})
+            df = gdf[["lat","lon",name_col]].rename(columns={name_col: "name"})
+            df["name"] = df["name"].astype(str)
+            return df
     elif any(f.name.endswith((".geojson",".json")) for f in uploaded_files):
         geojson_file = [f for f in uploaded_files if f.name.endswith((".geojson",".json"))][0]
         gdf = gpd.read_file(geojson_file)
@@ -46,7 +48,9 @@ def file_to_df(uploaded_files):
             st.warning("Point以外は非対応です")
             return pd.DataFrame(columns=["lat", "lon", "name"])
         name_col = guess_name_col(gdf)
-        return gdf[["lat","lon",name_col]].rename(columns={name_col: "name"})
+        df = gdf[["lat","lon",name_col]].rename(columns={name_col: "name"})
+        df["name"] = df["name"].astype(str)
+        return df
     elif any(f.name.endswith(".csv") for f in uploaded_files):
         csv_file = [f for f in uploaded_files if f.name.endswith(".csv")][0]
         df = pd.read_csv(csv_file)
@@ -54,7 +58,9 @@ def file_to_df(uploaded_files):
             st.warning("lat, lon 列が必要です")
             return pd.DataFrame(columns=["lat", "lon", "name"])
         name_col = guess_name_col(df)
-        return df[["lat","lon",name_col]].rename(columns={name_col: "name"})
+        df = df[["lat","lon",name_col]].rename(columns={name_col: "name"})
+        df["name"] = df["name"].astype(str)
+        return df
     else:
         st.warning("SHP/GeoJSON/CSVのみ対応です")
         return pd.DataFrame(columns=["lat", "lon", "name"])
@@ -91,26 +97,21 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
-# ---------------------------------------
-# セッション管理
-# ---------------------------------------
+# --------------- セッション管理 ---------------
 if "shelters" not in st.session_state:
-    # ダミーデータ1件入れておくことで常に地図表示が保証される
+    # 初期値は上島町役場だけ
     st.session_state["shelters"] = pd.DataFrame([
-        {"lat": 34.2832, "lon": 133.1831, "name": "上島町仮避難所"}
+        {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
     ])
 if "selected" not in st.session_state:
     st.session_state["selected"] = []
 if "route" not in st.session_state:
     st.session_state["route"] = []
 
-# ---------------------------------------
-# ファイルアップロード
-# ---------------------------------------
+# --------------- ファイルアップロード ---------------
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
-
 uploaded_files = st.sidebar.file_uploader(
-    "全ファイル一括選択可能です（例: SHP一式, GeoJSON, CSV混在OK）",
+    "全ファイル一括選択可（SHP一式, GeoJSON, CSV混在OK）",
     type=["shp", "shx", "dbf", "prj", "cpg", "geojson", "json", "csv"],
     accept_multiple_files=True
 )
@@ -118,25 +119,27 @@ if uploaded_files:
     df = file_to_df(uploaded_files)
     if not df.empty:
         st.session_state["shelters"] = pd.concat([st.session_state["shelters"], df], ignore_index=True).drop_duplicates(subset=["lat","lon","name"], keep="first")
+        st.session_state["shelters"]["name"] = st.session_state["shelters"]["name"].astype(str)
         st.success(f"{len(df)}件の避難所を追加しました")
 
 # 手動追加
 with st.sidebar.form(key="manual_add"):
     st.write("避難所を手動で追加")
-    lat = st.number_input("緯度", value=34.2832, format="%f")
-    lon = st.number_input("経度", value=133.1831, format="%f")
+    lat = st.number_input("緯度", value=KAMIJIMA_CENTER[0], format="%f")
+    lon = st.number_input("経度", value=KAMIJIMA_CENTER[1], format="%f")
     name = st.text_input("避難所名", "新しい避難所")
     add_btn = st.form_submit_button("追加")
     if add_btn:
         st.session_state["shelters"] = pd.concat([
             st.session_state["shelters"],
-            pd.DataFrame([{"lat": lat, "lon": lon, "name": name}])
+            pd.DataFrame([{"lat": lat, "lon": lon, "name": str(name)}])
         ], ignore_index=True)
+        st.session_state["shelters"]["name"] = st.session_state["shelters"]["name"].astype(str)
 
 # 全削除
 if st.sidebar.button("すべて削除"):
     st.session_state["shelters"] = pd.DataFrame([
-        {"lat": 34.2832, "lon": 133.1831, "name": "上島町仮避難所"}
+        {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
     ])
     st.session_state["selected"] = []
     st.session_state["route"] = []
@@ -145,20 +148,17 @@ if st.sidebar.button("すべて削除"):
 csv_export = st.session_state["shelters"].to_csv(index=False)
 st.sidebar.download_button("避難所CSVをダウンロード", csv_export, file_name="shelters.csv", mime="text/csv")
 
-# ---------------------------------------
-# 選択避難所チェックUI
-# ---------------------------------------
+# --------------- 選択避難所チェックUI ---------------
 st.header("📋 避難所リストから計算対象を選択")
 shelters_df = st.session_state["shelters"].copy()
-
-# 型変換（安全策）
+# 型変換
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
 shelters_df["lon"] = pd.to_numeric(shelters_df["lon"], errors="coerce")
+shelters_df["name"] = shelters_df["name"].astype(str)
 shelters_df = shelters_df.dropna(subset=["lat", "lon"])
 
 if not shelters_df.empty:
     select_labels = [f"{row['name']} ({row['lat']:.5f},{row['lon']:.5f})" for _, row in shelters_df.iterrows()]
-    # マルチセレクトボックスで選択状態管理
     selected_labels = st.multiselect(
         "巡回したい避難所に✔を入れてください（順序は自動で最適化されます）",
         options=select_labels,
@@ -169,9 +169,7 @@ if not shelters_df.empty:
 else:
     st.info("避難所データをまずアップロード・追加してください。")
 
-# ---------------------------------------
-# TSPルート計算
-# ---------------------------------------
+# --------------- TSPルート計算 ---------------
 st.header("🚩 最短巡回ルート計算・地図表示")
 if st.button("選択避難所でTSP最短巡回ルート計算"):
     selected = st.session_state["selected"]
@@ -186,9 +184,7 @@ if st.button("選択避難所でTSP最短巡回ルート計算"):
         total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
         st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（直線距離）")
 
-# ---------------------------------------
-# 3D地図表示
-# ---------------------------------------
+# --------------- 3D地図表示 ---------------
 df = shelters_df
 route = st.session_state["route"]
 
@@ -214,12 +210,10 @@ if route and len(route) > 1 and all(i < len(df) for i in route):
     )
     layers.append(layer_line)
 
-latitude = float(df["lat"].mean()) if len(df) > 0 else 34.2832
-longitude = float(df["lon"].mean()) if len(df) > 0 else 133.1831
-
+# 常に上島町役場中心で表示
 view = pdk.ViewState(
-    latitude=latitude,
-    longitude=longitude,
+    latitude=KAMIJIMA_CENTER[0],
+    longitude=KAMIJIMA_CENTER[1],
     zoom=13,
     pitch=45,
     bearing=0,
