@@ -1,8 +1,9 @@
 streamlit
 pydeck
-pandas
-ortools
-numpy
 geopandas
+pandas
+numpy
 osmnx
+networkx
+ortools
 shapely
