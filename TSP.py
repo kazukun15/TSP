@@ -7,18 +7,14 @@ import tempfile
 import os
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-# デザイン推奨：地図中心
 KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
-
-st.set_page_config(page_title="避難所TSPラベル地図", layout="wide")
-st.title("🏫 避難所TSPルートアプリ（地図デザイン＆ラベル選択＆切替）")
+st.set_page_config(page_title="避難所TSPラベル地図（見やすい集会所）", layout="wide")
+st.title("🏫 避難所TSPルートアプリ（集会所ピン小サイズ＋地図見やすいデザイン）")
 
 def guess_name_col(df):
-    # 一般的にラベルにしたい順で選ぶ
     for cand in ["name", "NAME", "名称", "避難所", "施設名", "address", "住所"]:
         if cand in df.columns:
             return cand
-    # 次にobject型（str系）から選ぶ
     obj_cols = [c for c in df.columns if df[c].dtype == 'O']
     if obj_cols:
         return obj_cols[0]
@@ -49,19 +45,12 @@ def file_to_df(uploaded_files):
         return pd.DataFrame(columns=["lat", "lon", "name"])
 
     # EPSG自動変換
-    crs_was_set = False
     if gdf.crs is None:
         st.warning("座標系情報がありません。EPSG:4326として扱います。")
         gdf.set_crs(epsg=4326, inplace=True)
-        crs_was_set = True
     elif gdf.crs.to_epsg() != 4326:
         st.info(f"座標系が {gdf.crs} → EPSG:4326 に自動変換します")
         gdf = gdf.to_crs(epsg=4326)
-        crs_was_set = True
-
-    # (確認用)CRSを表示
-    if crs_was_set:
-        st.write(f"現在のCRS: {gdf.crs}")
 
     if gdf.geometry.iloc[0].geom_type != "Point":
         st.warning("Point型ジオメトリのみ対応です")
@@ -102,7 +91,6 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
-# セッション管理
 if "shelters" not in st.session_state:
     st.session_state["shelters"] = pd.DataFrame([
         {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
@@ -127,10 +115,8 @@ if uploaded_files:
     gdf = file_to_df(uploaded_files)
     if not gdf.empty:
         gdf = gdf[[c for c in gdf.columns if c in ["lat", "lon"] or gdf[c].dtype == 'O']].copy()
-        # ラベル候補列を抽出
         st.session_state["shelters"] = pd.concat([st.session_state["shelters"], gdf], ignore_index=True)
         st.success(f"{len(gdf)}件の避難所を追加しました")
-        # 追加直後は推奨カラムで上書き
         st.session_state["label_col"] = guess_name_col(st.session_state["shelters"])
 
 # 手動追加
@@ -162,7 +148,6 @@ st.header("📋 避難所リストから計算対象とラベル・地図を選�
 shelters_df = st.session_state["shelters"].copy()
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
 shelters_df["lon"] = pd.to_numeric(shelters_df["lon"], errors="coerce")
-# ラベル候補（object型カラムのみ選択肢に）
 label_candidates = [c for c in shelters_df.columns if shelters_df[c].dtype == "O"]
 if len(label_candidates) == 0:
     label_candidates = ["name"]
@@ -188,9 +173,7 @@ style_name = st.selectbox(
 )
 st.session_state["map_style"] = style_name
 
-# カラム欠損除去
 shelters_df = shelters_df.dropna(subset=["lat", "lon"])
-
 if not shelters_df.empty:
     select_labels = [f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})" for _, row in shelters_df.iterrows()]
     selected_labels = st.multiselect(
@@ -220,14 +203,15 @@ if st.button("選択避難所でTSP最短巡回ルート計算"):
 df = shelters_df
 route = st.session_state["route"]
 
-# -------------------- pydeck: ラベルも表示 -------------------
+# -------------------- ピンを小さく、道路を強調 -------------------
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
     data=df,
     get_position='[lon, lat]',
     get_color='[0, 150, 255, 200]',
-    get_radius=150,
-    radius_min_pixels=2,
+    get_radius=40,         # ←小さく
+    radius_min_pixels=1,   # ←より小さく
+    radius_max_pixels=6,   # ←より小さく
     pickable=True,
 )
 
@@ -236,8 +220,8 @@ layer_text = pdk.Layer(
     data=df,
     get_position='[lon, lat]',
     get_text=st.session_state["label_col"],
-    get_size=18,
-    get_color=[20, 20, 40, 230],
+    get_size=12,            # ←小さめ
+    get_color=[20, 20, 40, 180],
     get_angle=0,
     get_alignment_baseline="'bottom'",
     pickable=False,
@@ -252,7 +236,7 @@ if route and len(route) > 1 and all(i < len(df) for i in route):
         data=pd.DataFrame({"start": coords[:-1], "end": coords[1:]}),
         get_source_position="start",
         get_target_position="end",
-        get_width=6,
+        get_width=4,      # ラインもやや細く
         get_color=[255, 50, 50, 180],
     )
     layers.append(layer_line)
@@ -264,9 +248,6 @@ view = pdk.ViewState(
     pitch=45,
     bearing=0,
 )
-
-# MapboxのAPI Keyが必要な場合は下記のように環境変数でセットして下さい
-# st.secrets["MAPBOX_KEY"] = "xxxx"
 st.pydeck_chart(pdk.Deck(
     map_style=map_style_dict[st.session_state["map_style"]],
     layers=layers,
