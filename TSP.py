@@ -8,8 +8,8 @@ import os
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
-st.set_page_config(page_title="避難所TSPラベル地図（チェックボックス選択UI）", layout="wide")
-st.title("🏫 避難所TSPルートアプリ（チェックボックス選択UI＋全件表示）")
+st.set_page_config(page_title="避難所TSPラベル地図", layout="wide")
+st.title("🏫 避難所TSPルートアプリ（地図最上部＋一覧分離）")
 
 def guess_name_col(df):
     for cand in ["name", "NAME", "名称", "避難所", "施設名", "address", "住所"]:
@@ -90,6 +90,7 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
+# セッション管理
 if "shelters" not in st.session_state:
     st.session_state["shelters"] = pd.DataFrame([
         {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
@@ -103,6 +104,7 @@ if "label_col" not in st.session_state:
 if "map_style" not in st.session_state:
     st.session_state["map_style"] = "light"
 
+# サイドバー
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
 uploaded_files = st.sidebar.file_uploader(
     "全ファイル一括選択可（SHP一式, GeoJSON, CSV混在OK）",
@@ -140,7 +142,7 @@ if st.sidebar.button("すべて削除"):
 csv_export = st.session_state["shelters"].to_csv(index=False)
 st.sidebar.download_button("避難所CSVをダウンロード", csv_export, file_name="shelters.csv", mime="text/csv")
 
-st.header("📋 チェックボックスで巡回施設を選択")
+# メインUI
 shelters_df = st.session_state["shelters"].copy()
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
 shelters_df["lon"] = pd.to_numeric(shelters_df["lon"], errors="coerce")
@@ -170,46 +172,12 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-if not shelters_df.empty:
-    check_col = st.columns([4, 1])
-    check_col[0].subheader("避難所リスト")
-    selected_flags = []
-    default_selected = set(st.session_state["selected"])
-    with check_col[0].form("facility_selector"):
-        selected_flags = []
-        for idx, row in shelters_df.iterrows():
-            checked = st.checkbox(
-                f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
-                value=(idx in default_selected),
-                key=f"cb_{idx}"
-            )
-            selected_flags.append(checked)
-        submitted = st.form_submit_button("選択確定")
-        if submitted:
-            st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
-else:
-    st.info("避難所データをまずアップロード・追加してください。")
-
-st.header("🚩 最短巡回ルート計算・地図表示")
-if st.button("選択避難所でTSP最短巡回ルート計算"):
-    selected = st.session_state["selected"]
-    if not selected or len(selected) < 2:
-        st.warning("最低2か所以上の避難所を選択してください。")
-    else:
-        df = shelters_df.iloc[selected].reset_index(drop=True)
-        locs = list(zip(df["lat"], df["lon"]))
-        distmat = create_distance_matrix(locs)
-        route = solve_tsp(distmat)
-        st.session_state["route"] = [selected[i] for i in route]
-        total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
-        st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（直線距離）")
-
-df = shelters_df
-route = st.session_state["route"]
+# ------------- 地図を最上部に大きく表示 -------------
+st.markdown("## 🗺️ 地図（全避難所ラベル付き表示・ルートのみ選択に応じて描画）")
 
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
-    data=df,
+    data=shelters_df,
     get_position='[lon, lat]',
     get_color='[0, 150, 255, 200]',
     get_radius=40,
@@ -220,7 +188,7 @@ layer_pts = pdk.Layer(
 
 layer_text = pdk.Layer(
     "TextLayer",
-    data=df,
+    data=shelters_df,
     get_position='[lon, lat]',
     get_text=st.session_state["label_col"],
     get_size=12,
@@ -232,9 +200,9 @@ layer_text = pdk.Layer(
 
 layers = [layer_pts, layer_text]
 
-# ルート線は選択したものだけ
-if route and len(route) > 1 and all(i < len(df) for i in route):
-    coords = [[df.iloc[i]["lon"], df.iloc[i]["lat"]] for i in route]
+route = st.session_state["route"]
+if route and len(route) > 1 and all(i < len(shelters_df) for i in route):
+    coords = [[shelters_df.iloc[i]["lon"], shelters_df.iloc[i]["lat"]] for i in route]
     layer_line = pdk.Layer(
         "LineLayer",
         data=pd.DataFrame({"start": coords[:-1], "end": coords[1:]}),
@@ -257,9 +225,45 @@ st.pydeck_chart(pdk.Deck(
     layers=layers,
     initial_view_state=view,
     tooltip={"text": f"{{{st.session_state['label_col']}}}"}
-))
+), use_container_width=True)
+
+# ------------- 施設一覧（チェックボックス）を地図の下に分離表示 -------------
+st.markdown("## 📋 巡回施設の選択")
+if not shelters_df.empty:
+    check_col = st.columns([6, 1])
+    check_col[0].subheader("避難所リスト")
+    selected_flags = []
+    default_selected = set(st.session_state["selected"])
+    with check_col[0].form("facility_selector"):
+        selected_flags = []
+        for idx, row in shelters_df.iterrows():
+            checked = st.checkbox(
+                f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
+                value=(idx in default_selected),
+                key=f"cb_{idx}"
+            )
+            selected_flags.append(checked)
+        submitted = st.form_submit_button("選択確定")
+        if submitted:
+            st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
+else:
+    st.info("避難所データをまずアップロード・追加してください。")
+
+st.markdown("## 🚩 最短巡回ルート計算")
+if st.button("選択避難所でTSP最短巡回ルート計算"):
+    selected = st.session_state["selected"]
+    if not selected or len(selected) < 2:
+        st.warning("最低2か所以上の避難所を選択してください。")
+    else:
+        df = shelters_df.iloc[selected].reset_index(drop=True)
+        locs = list(zip(df["lat"], df["lon"]))
+        distmat = create_distance_matrix(locs)
+        route = solve_tsp(distmat)
+        st.session_state["route"] = [selected[i] for i in route]
+        total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
+        st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（直線距離）")
 
 with st.expander("避難所リスト/巡回順"):
-    st.dataframe(df)
-    if route and all(i < len(df) for i in route):
-        st.write("巡回順（0起点）:", [df.iloc[i][st.session_state["label_col"]] for i in route])
+    st.dataframe(shelters_df)
+    if route and all(i < len(shelters_df) for i in route):
+        st.write("巡回順（0起点）:", [shelters_df.iloc[i][st.session_state["label_col"]] for i in route])
