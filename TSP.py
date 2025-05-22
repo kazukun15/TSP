@@ -7,11 +7,11 @@ import tempfile
 import os
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-# 上島町役場の座標
-KAMIJIMA_CENTER = (34.2224, 133.2005)
+# 地図の中心座標
+KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
 
-st.set_page_config(page_title="避難所TSPルート（上島町役場中心）", layout="wide")
-st.title("🏫 避難所TSPルートアプリ（中心：上島町役場）")
+st.set_page_config(page_title="避難所TSPルート（大量データ対応）", layout="wide")
+st.title("🏫 避難所TSPルートアプリ（大量データ対応・中心：上島町役場）")
 
 # --------------- 共通関数 ---------------
 def guess_name_col(df):
@@ -99,7 +99,6 @@ def solve_tsp(distance_matrix):
 
 # --------------- セッション管理 ---------------
 if "shelters" not in st.session_state:
-    # 初期値は上島町役場だけ
     st.session_state["shelters"] = pd.DataFrame([
         {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
     ])
@@ -151,18 +150,20 @@ st.sidebar.download_button("避難所CSVをダウンロード", csv_export, file
 # --------------- 選択避難所チェックUI ---------------
 st.header("📋 避難所リストから計算対象を選択")
 shelters_df = st.session_state["shelters"].copy()
-# 型変換
+# 型変換とNaN除去・name強制str
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
 shelters_df["lon"] = pd.to_numeric(shelters_df["lon"], errors="coerce")
 shelters_df["name"] = shelters_df["name"].astype(str)
 shelters_df = shelters_df.dropna(subset=["lat", "lon"])
-
 if not shelters_df.empty:
+    if len(shelters_df) > 10000:
+        st.warning(f"避難所数: {len(shelters_df)} 件。1万件以上の表示は端末によっては時間がかかる/固まることがあります。")
     select_labels = [f"{row['name']} ({row['lat']:.5f},{row['lon']:.5f})" for _, row in shelters_df.iterrows()]
+    # 1,000件超でも一括選択をデフォルトOFFにする
     selected_labels = st.multiselect(
-        "巡回したい避難所に✔を入れてください（順序は自動で最適化されます）",
+        "巡回したい避難所（最大1000件まで選択を推奨）",
         options=select_labels,
-        default=[select_labels[i] for i in st.session_state["selected"]] if st.session_state["selected"] else select_labels
+        default=[select_labels[i] for i in st.session_state["selected"]] if st.session_state["selected"] else (select_labels if len(select_labels) < 1000 else [])
     )
     selected_idx = [select_labels.index(lab) for lab in selected_labels]
     st.session_state["selected"] = selected_idx
@@ -175,6 +176,8 @@ if st.button("選択避難所でTSP最短巡回ルート計算"):
     selected = st.session_state["selected"]
     if not selected or len(selected) < 2:
         st.warning("最低2か所以上の避難所を選択してください。")
+    elif len(selected) > 1000:
+        st.warning("巡回ルート計算は1000地点以内にしてください（計算時間・メモリ負荷のため）")
     else:
         df = shelters_df.iloc[selected].reset_index(drop=True)
         locs = list(zip(df["lat"], df["lon"]))
@@ -184,7 +187,7 @@ if st.button("選択避難所でTSP最短巡回ルート計算"):
         total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
         st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（直線距離）")
 
-# --------------- 3D地図表示 ---------------
+# --------------- 3D地図表示（大量データでも軽い設定） ---------------
 df = shelters_df
 route = st.session_state["route"]
 
@@ -192,8 +195,10 @@ layer_pts = pdk.Layer(
     "ScatterplotLayer",
     data=df,
     get_position='[lon, lat]',
-    get_color='[0, 150, 255, 200]',
-    get_radius=150,
+    get_color='[0, 150, 255, 180]',
+    get_radius=70,              # 小さくしても視認性確保
+    radius_min_pixels=2,        # 点が極小でも表示
+    radius_max_pixels=20,
     pickable=True,
 )
 layers = [layer_pts]
@@ -210,7 +215,6 @@ if route and len(route) > 1 and all(i < len(df) for i in route):
     )
     layers.append(layer_line)
 
-# 常に上島町役場中心で表示
 view = pdk.ViewState(
     latitude=KAMIJIMA_CENTER[0],
     longitude=KAMIJIMA_CENTER[1],
@@ -225,6 +229,6 @@ st.pydeck_chart(pdk.Deck(
 ))
 
 with st.expander("避難所リスト/巡回順"):
-    st.dataframe(df)
+    st.dataframe(df if len(df) < 5000 else df.head(5000))
     if route and all(i < len(df) for i in route):
         st.write("巡回順（0起点）:", [df.iloc[i]['name'] for i in route])
