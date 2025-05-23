@@ -10,7 +10,7 @@ import networkx as nx
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
-st.set_page_config(page_title="避難所TSP（GeoJSONスマホ対応）", layout="wide")
+st.set_page_config(page_title="避難所最短ルート探すくん", layout="wide")
 
 st.markdown("""
     <style>
@@ -20,7 +20,7 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
-st.title("🏫 避難所TSPルートアプリ（GeoJSON対応・スマホ/PC両対応）")
+st.title("🏫 避難所最短ルート探すくん")
 
 def guess_name_col(df):
     for cand in ["name", "NAME", "名称", "避難所", "施設名", "address", "住所"]:
@@ -88,7 +88,6 @@ def create_road_distance_matrix(locs, mode="drive"):
         locs = [(float(lat), float(lon)) for lat, lon in locs]
         lats = [p[0] for p in locs]
         lons = [p[1] for p in locs]
-        # osmnx 1.x以降は必ずキーワード引数で渡す
         G = ox.graph_from_bbox(
             north=max(lats) + 0.01,
             south=min(lats) - 0.01,
@@ -144,10 +143,37 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
+# === 初期避難所データをGeoJSONからロード ===
+def load_initial_geojson(filepath):
+    try:
+        gdf = gpd.read_file(filepath)
+        # EPSG自動変換
+        if gdf.crs is None:
+            gdf.set_crs(epsg=4326, inplace=True)
+        elif gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+        if "geometry" not in gdf.columns or gdf.empty:
+            return pd.DataFrame(columns=["lat", "lon", "name"])
+        gdf = gdf[gdf.geometry.type == "Point"]
+        gdf["lon"] = gdf.geometry.x
+        gdf["lat"] = gdf.geometry.y
+        if "name" not in gdf.columns:
+            gdf["name"] = gdf.index.astype(str)
+        gdf["lat"] = pd.to_numeric(gdf["lat"], errors="coerce")
+        gdf["lon"] = pd.to_numeric(gdf["lon"], errors="coerce")
+        gdf = gdf.dropna(subset=["lat", "lon"])
+        return gdf.reset_index(drop=True)
+    except Exception as e:
+        st.error(f"初期GeoJSON読み込みエラー: {e}")
+        return pd.DataFrame(columns=["lat", "lon", "name"])
+
+# === 初回起動時のみ初期データロード ===
 if "shelters" not in st.session_state:
-    st.session_state["shelters"] = pd.DataFrame([
-        {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
-    ])
+    # ファイルパスはStreamlit Cloud等の環境に応じて適切に
+    # 例: /mnt/data/hinanjyo.geojson
+    geojson_path = "/mnt/data/hinanjyo.geojson"
+    st.session_state["shelters"] = load_initial_geojson(geojson_path)
+
 if "selected" not in st.session_state:
     st.session_state["selected"] = []
 if "route" not in st.session_state:
@@ -192,9 +218,7 @@ with st.sidebar.form(key="manual_add"):
         ], ignore_index=True)
 
 if st.sidebar.button("すべて削除"):
-    st.session_state["shelters"] = pd.DataFrame([
-        {"lat": KAMIJIMA_CENTER[0], "lon": KAMIJIMA_CENTER[1], "name": "上島町役場"}
-    ])
+    st.session_state["shelters"] = load_initial_geojson("/mnt/data/hinanjyo.geojson")
     st.session_state["selected"] = []
     st.session_state["route"] = []
     st.session_state["road_path"] = []
@@ -276,7 +300,6 @@ if tsp_btn:
                 st.session_state["road_path"] = []
             else:
                 route = solve_tsp(distmat)
-                # 巡回ルートのインデックス正規化（念のため再検証）
                 route = [i for i in route if i < len(node_ids)]
                 st.session_state["route"] = [selected[i] for i in route if i < len(selected)]
                 total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1) if route[i]<len(distmat) and route[i+1]<len(distmat)])
