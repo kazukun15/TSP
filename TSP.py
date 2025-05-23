@@ -3,8 +3,6 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import pydeck as pdk
-import tempfile
-import os
 import osmnx as ox
 import networkx as nx
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -34,6 +32,7 @@ def guess_name_col(df):
 def file_to_df(uploaded_files):
     try:
         if any(f.name.endswith(".shp") for f in uploaded_files):
+            import tempfile, os
             with tempfile.TemporaryDirectory() as temp_dir:
                 for file in uploaded_files:
                     with open(os.path.join(temp_dir, file.name), "wb") as out:
@@ -62,7 +61,7 @@ def file_to_df(uploaded_files):
         elif gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
 
-        # 空データ・ジオメトリ不在対応
+        # Point型だけ抽出
         if "geometry" not in gdf.columns or gdf.empty:
             st.warning("ジオメトリ情報がありません")
             return pd.DataFrame(columns=["lat", "lon", "name"])
@@ -169,9 +168,7 @@ def load_initial_geojson(filepath):
 
 # === 初回起動時のみ初期データロード ===
 if "shelters" not in st.session_state:
-    # ファイルパスはStreamlit Cloud等の環境に応じて適切に
-    # 例: /mnt/data/hinanjyo.geojson
-    geojson_path = "/mnt/data/hinanjyo.geojson"
+    geojson_path = "hinanjyo.geojson"
     st.session_state["shelters"] = load_initial_geojson(geojson_path)
 
 if "selected" not in st.session_state:
@@ -218,7 +215,7 @@ with st.sidebar.form(key="manual_add"):
         ], ignore_index=True)
 
 if st.sidebar.button("すべて削除"):
-    st.session_state["shelters"] = load_initial_geojson("/mnt/data/hinanjyo.geojson")
+    st.session_state["shelters"] = load_initial_geojson("hinanjyo.geojson")
     st.session_state["selected"] = []
     st.session_state["route"] = []
     st.session_state["road_path"] = []
