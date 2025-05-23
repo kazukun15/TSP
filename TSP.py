@@ -227,23 +227,22 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-# --- 巡回施設選択（expander内・チェックボックス） ---
+# --- 巡回施設選択：マルチセレクト方式（超大量施設も快適） ---
 st.markdown("## 📋 巡回施設の選択")
 if not shelters_df.empty:
-    with st.expander("📋 巡回施設リスト（クリックで開閉・チェック選択）", expanded=False):
-        selected_flags = []
-        default_selected = set(st.session_state["selected"])
-        with st.form("facility_selector"):
-            for idx, row in shelters_df.iterrows():
-                checked = st.checkbox(
-                    f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
-                    value=(idx in default_selected),
-                    key=f"cb_{idx}"
-                )
-                selected_flags.append(checked)
-            submitted = st.form_submit_button("選択確定")
-            if submitted:
-                st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
+    display_names = [
+        f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})"
+        for _, row in shelters_df.iterrows()
+    ]
+    idx_to_name = {i: name for i, name in enumerate(display_names)}
+    selected_idx = st.multiselect(
+        "巡回対象にする施設を選択（複数選択可）",
+        options=list(idx_to_name.keys()),
+        format_func=lambda x: idx_to_name[x],
+        default=st.session_state["selected"],
+        key="multiselect_tsp"
+    )
+    st.session_state["selected"] = selected_idx
 else:
     st.info("避難所データをまずアップロード・追加してください。")
 
