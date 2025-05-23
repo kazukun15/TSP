@@ -88,20 +88,34 @@ def create_road_distance_matrix(locs, mode="drive"):
         locs = [(float(lat), float(lon)) for lat, lon in locs]
         lats = [p[0] for p in locs]
         lons = [p[1] for p in locs]
-        north, south, east, west = max(lats)+0.01, min(lats)-0.01, max(lons)+0.01, min(lons)-0.01
-        G = ox.graph_from_bbox(north, south, east, west, network_type=mode)
-        node_ids = [ox.nearest_nodes(G, float(lon), float(lat)) for lat, lon in locs]
+        # osmnx 1.x以降は必ずキーワード引数で渡す
+        G = ox.graph_from_bbox(
+            north=max(lats) + 0.01,
+            south=min(lats) - 0.01,
+            east=max(lons) + 0.01,
+            west=min(lons) - 0.01,
+            network_type=mode
+        )
+        node_ids = []
+        for lat, lon in locs:
+            try:
+                node_id = ox.nearest_nodes(G, lon, lat)
+                node_ids.append(node_id)
+            except Exception:
+                node_ids.append(None)
         n = len(locs)
         mat = np.zeros((n, n))
         for i in range(n):
             for j in range(n):
                 if i == j:
                     mat[i, j] = 0
-                else:
+                elif node_ids[i] is not None and node_ids[j] is not None:
                     try:
                         mat[i, j] = nx.shortest_path_length(G, node_ids[i], node_ids[j], weight='length') / 1000
                     except (nx.NetworkXNoPath, nx.NodeNotFound):
                         mat[i, j] = float('inf')
+                else:
+                    mat[i, j] = float('inf')
         return mat, G, node_ids
     except Exception as e:
         st.error(f"道路ネットワーク構築エラー: {e}")
@@ -262,17 +276,20 @@ if tsp_btn:
                 st.session_state["road_path"] = []
             else:
                 route = solve_tsp(distmat)
-                st.session_state["route"] = [selected[i] for i in route]
-                total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
+                # 巡回ルートのインデックス正規化（念のため再検証）
+                route = [i for i in route if i < len(node_ids)]
+                st.session_state["route"] = [selected[i] for i in route if i < len(selected)]
+                total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1) if route[i]<len(distmat) and route[i+1]<len(distmat)])
                 # 実際の経路ラインも取得
                 full_path = []
                 for i in range(len(route)-1):
                     try:
-                        seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
-                        seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
-                        if i != 0:
-                            seg_coords = seg_coords[1:]
-                        full_path.extend(seg_coords)
+                        if node_ids[route[i]] is not None and node_ids[route[i+1]] is not None:
+                            seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
+                            seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
+                            if i != 0:
+                                seg_coords = seg_coords[1:]
+                            full_path.extend(seg_coords)
                     except Exception as e:
                         st.error(f"経路描画エラー: {e}")
                         continue
