@@ -88,7 +88,6 @@ def create_road_distance_matrix(locs, mode="drive"):
     version = packaging.version.parse(ox.__version__)
     try:
         if version < packaging.version.parse("2.0.0"):
-            # osmnx v1.x系（位置引数のみ）
             G = ox.graph_from_bbox(
                 max(lats) + 0.01,
                 min(lats) - 0.01,
@@ -97,7 +96,6 @@ def create_road_distance_matrix(locs, mode="drive"):
                 network_type=mode
             )
         else:
-            # osmnx v2.x系（bboxキーワード引数）
             bbox = (max(lats) + 0.01, min(lats) - 0.01, max(lons) + 0.01, min(lons) - 0.01)
             G = ox.graph_from_bbox(bbox=bbox, network_type=mode)
         node_ids = []
@@ -132,12 +130,14 @@ def solve_tsp(distance_matrix):
     def distance_callback(from_index, to_index):
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
-        return int(distance_matrix[from_node][to_node]*100000)
+        return int(distance_matrix[from_node][to_node] * 100000)
     transit_callback_index = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.time_limit.seconds = 1  # 1秒で打ち切り（高速化！）
     search_parameters.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
     solution = routing.SolveWithParameters(search_parameters)
     route = []
     if solution:
@@ -261,8 +261,11 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-# --- 巡回施設選択（1回目で即反映/エラーなし） ---
-st.markdown("## 📋 巡回施設の選択")
+# --- 巡回施設選択（小さい見出し） ---
+st.markdown(
+    "<span style='font-size:14px;'>📋 巡回施設の選択</span>",
+    unsafe_allow_html=True
+)
 if not shelters_df.empty:
     display_names = [
         f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})"
@@ -313,8 +316,11 @@ if tsp_btn:
                 st.session_state["road_path"] = full_path
                 st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
 
-# --- 地図 ---
-st.markdown("## 🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）")
+# --- 地図（小さい見出し） ---
+st.markdown(
+    "<span style='font-size:14px;'>🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）</span>",
+    unsafe_allow_html=True
+)
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
     data=shelters_df,
