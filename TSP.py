@@ -61,17 +61,20 @@ def file_to_df(uploaded_files):
             gdf.set_crs(epsg=4326, inplace=True)
         elif gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
-        # Point型以外は除外
-        gdf = gdf[gdf.geometry.type == "Point"]
-        if gdf.empty:
+
+        # 空データ・ジオメトリ不在対応
+        if "geometry" not in gdf.columns or gdf.empty:
+            st.warning("ジオメトリ情報がありません")
+            return pd.DataFrame(columns=["lat", "lon", "name"])
+        if not (gdf.geometry.type == "Point").any():
             st.warning("Point型ジオメトリのみ対応です")
             return pd.DataFrame(columns=["lat", "lon", "name"])
+        gdf = gdf[gdf.geometry.type == "Point"]
+
         gdf["lon"] = gdf.geometry.x
         gdf["lat"] = gdf.geometry.y
-        # name列がなければ追加
         if "name" not in gdf.columns:
             gdf["name"] = gdf.index.astype(str)
-        # float型変換
         gdf["lat"] = pd.to_numeric(gdf["lat"], errors="coerce")
         gdf["lon"] = pd.to_numeric(gdf["lon"], errors="coerce")
         gdf = gdf.dropna(subset=["lat", "lon"])
@@ -82,7 +85,6 @@ def file_to_df(uploaded_files):
 
 def create_road_distance_matrix(locs, mode="drive"):
     try:
-        # 型変換で全てfloatに
         locs = [(float(lat), float(lon)) for lat, lon in locs]
         lats = [p[0] for p in locs]
         lons = [p[1] for p in locs]
@@ -284,7 +286,7 @@ if not shelters_df.empty:
                 key=f"cb_{idx}"
             )
             selected_flags.append(checked)
-        submitted = st.form_submit_button("選択確定")
+        submitted = check_col[0].form_submit_button("選択確定")
         if submitted:
             st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
 else:
@@ -315,7 +317,7 @@ if st.button("道路でTSP最短巡回ルート計算"):
                     try:
                         seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
                         seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
-                        if i != 0:  # 重複点削除
+                        if i != 0:
                             seg_coords = seg_coords[1:]
                         full_path.extend(seg_coords)
                     except Exception as e:
@@ -324,7 +326,8 @@ if st.button("道路でTSP最短巡回ルート計算"):
                 st.session_state["road_path"] = full_path
                 st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
 
-with st.expander("避難所リスト/巡回順"):
+# ▼▼▼ 折りたたみ（expander）表示に変更！ ▼▼▼
+with st.expander("📋 避難所データ一覧・巡回順（クリックで開閉）", expanded=False):
     st.dataframe(shelters_df)
     if st.session_state.get("route") and all(i < len(shelters_df) for i in st.session_state["route"]):
         st.write("巡回順（0起点）:", [shelters_df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
