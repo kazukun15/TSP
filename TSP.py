@@ -5,6 +5,7 @@ import numpy as np
 import pydeck as pdk
 import osmnx as ox
 import networkx as nx
+import packaging.version
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 KAMIJIMA_CENTER = (34.25754417840102, 133.20446981161595)
@@ -55,13 +56,11 @@ def file_to_df(uploaded_files):
             st.warning("SHP/GeoJSON/CSVのみ対応です")
             return pd.DataFrame(columns=["lat", "lon", "name"])
 
-        # EPSG自動変換
         if gdf.crs is None:
             gdf.set_crs(epsg=4326, inplace=True)
         elif gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
 
-        # Point型だけ抽出
         if "geometry" not in gdf.columns or gdf.empty:
             st.warning("ジオメトリ情報がありません")
             return pd.DataFrame(columns=["lat", "lon", "name"])
@@ -82,20 +81,25 @@ def file_to_df(uploaded_files):
         st.error(f"ファイル読み込みエラー: {e}")
         return pd.DataFrame(columns=["lat", "lon", "name"])
 
-# ==== graph_from_bboxの修正版（引数は順番で！）====
 def create_road_distance_matrix(locs, mode="drive"):
+    locs = [(float(lat), float(lon)) for lat, lon in locs]
+    lats = [p[0] for p in locs]
+    lons = [p[1] for p in locs]
+    version = packaging.version.parse(ox.__version__)
     try:
-        locs = [(float(lat), float(lon)) for lat, lon in locs]
-        lats = [p[0] for p in locs]
-        lons = [p[1] for p in locs]
-        # graph_from_bbox(north, south, east, west, network_type)
-        G = ox.graph_from_bbox(
-            max(lats) + 0.01,
-            min(lats) - 0.01,
-            max(lons) + 0.01,
-            min(lons) - 0.01,
-            network_type=mode
-        )
+        if version < packaging.version.parse("2.0.0"):
+            # osmnx v1.x系（位置引数のみ）
+            G = ox.graph_from_bbox(
+                max(lats) + 0.01,
+                min(lats) - 0.01,
+                max(lons) + 0.01,
+                min(lons) - 0.01,
+                network_type=mode
+            )
+        else:
+            # osmnx v2.x系（bboxキーワード引数）
+            bbox = (max(lats) + 0.01, min(lats) - 0.01, max(lons) + 0.01, min(lons) - 0.01)
+            G = ox.graph_from_bbox(bbox=bbox, network_type=mode)
         node_ids = []
         for lat, lon in locs:
             try:
@@ -257,7 +261,7 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-# --- 巡回施設選択：session_state管理からst.multiselectのkey管理へ ---
+# --- 巡回施設選択（1回目で即反映/エラーなし） ---
 st.markdown("## 📋 巡回施設の選択")
 if not shelters_df.empty:
     display_names = [
@@ -265,7 +269,6 @@ if not shelters_df.empty:
         for _, row in shelters_df.iterrows()
     ]
     idx_to_name = {i: name for i, name in enumerate(display_names)}
-    # ここでdefaultは使わず、key管理だけにする
     st.multiselect(
         "巡回対象にする施設を選択（複数選択可）",
         options=list(idx_to_name.keys()),
