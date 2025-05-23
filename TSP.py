@@ -270,15 +270,13 @@ st.pydeck_chart(pdk.Deck(
     tooltip={"text": f"{{{st.session_state['label_col']}}}"}
 ), use_container_width=True)
 
-# 施設選択（チェックボックス）
+# 施設選択（チェックボックス） - フォームを正しく使用
 st.markdown("## 📋 巡回施設の選択")
 if not shelters_df.empty:
-    check_col = st.columns([1])
-    check_col[0].subheader("避難所リスト")
-    selected_flags = []
-    default_selected = set(st.session_state["selected"])
-    with check_col[0].form("facility_selector"):
+    with st.form("facility_selector"):
+        st.subheader("避難所リスト")
         selected_flags = []
+        default_selected = set(st.session_state["selected"])
         for idx, row in shelters_df.iterrows():
             checked = st.checkbox(
                 f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
@@ -286,7 +284,7 @@ if not shelters_df.empty:
                 key=f"cb_{idx}"
             )
             selected_flags.append(checked)
-        submitted = check_col[0].form_submit_button("選択確定")
+        submitted = st.form_submit_button("選択確定")
         if submitted:
             st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
 else:
@@ -326,7 +324,7 @@ if st.button("道路でTSP最短巡回ルート計算"):
                 st.session_state["road_path"] = full_path
                 st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
 
-# ▼▼▼ 折りたたみ（expander）表示に変更！ ▼▼▼
+# 折りたたみ表示
 with st.expander("📋 避難所データ一覧・巡回順（クリックで開閉）", expanded=False):
     st.dataframe(shelters_df)
     if st.session_state.get("route") and all(i < len(shelters_df) for i in st.session_state["route"]):
