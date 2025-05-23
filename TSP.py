@@ -144,6 +144,8 @@ if "label_col" not in st.session_state:
     st.session_state["label_col"] = "name"
 if "map_style" not in st.session_state:
     st.session_state["map_style"] = "light"
+if "ox_mode" not in st.session_state:
+    st.session_state["ox_mode"] = "drive"
 
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
 st.sidebar.info(
@@ -187,6 +189,14 @@ if st.sidebar.button("すべて削除"):
 csv_export = st.session_state["shelters"].to_csv(index=False)
 st.sidebar.download_button("避難所CSVをダウンロード", csv_export, file_name="shelters.csv", mime="text/csv")
 
+# --- サイドバー：道路種別・TSPルート計算をまとめてフォーム化 ---
+with st.sidebar.form("tsp_form"):
+    st.markdown("---")
+    st.header("TSPルート計算")
+    mode_disp = st.selectbox("道路種別", ["車（drive推奨）", "徒歩（歩道のみ）"], index=0, key="sb_mode")
+    st.session_state["ox_mode"] = "drive" if "車" in mode_disp else "walk"
+    tsp_btn = st.form_submit_button("道路でTSP最短巡回ルート計算")
+
 # メインUI
 shelters_df = st.session_state["shelters"].copy()
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
@@ -217,7 +227,60 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-# 地図最上部
+# --- 巡回施設選択（expander内・チェックボックス） ---
+st.markdown("## 📋 巡回施設の選択")
+if not shelters_df.empty:
+    with st.expander("📋 巡回施設リスト（クリックで開閉・チェック選択）", expanded=False):
+        selected_flags = []
+        default_selected = set(st.session_state["selected"])
+        with st.form("facility_selector"):
+            for idx, row in shelters_df.iterrows():
+                checked = st.checkbox(
+                    f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
+                    value=(idx in default_selected),
+                    key=f"cb_{idx}"
+                )
+                selected_flags.append(checked)
+            submitted = st.form_submit_button("選択確定")
+            if submitted:
+                st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
+else:
+    st.info("避難所データをまずアップロード・追加してください。")
+
+# --- TSPボタンが押されたら処理 ---
+if tsp_btn:
+    selected = st.session_state["selected"]
+    if not selected or len(selected) < 2:
+        st.warning("最低2か所以上の避難所を選択してください。")
+        st.session_state["road_path"] = []
+    else:
+        df = shelters_df.iloc[selected].reset_index(drop=True)
+        locs = list(zip(df["lat"], df["lon"]))
+        with st.spinner("OSM道路情報を取得＆巡回ルートを計算中...（通信状況により数秒かかります）"):
+            distmat, G, node_ids = create_road_distance_matrix(locs, mode=st.session_state["ox_mode"])
+            if np.any(np.isinf(distmat)):
+                st.error("一部の避難所間で道路がつながっていません。別の組合せで試してください。")
+                st.session_state["road_path"] = []
+            else:
+                route = solve_tsp(distmat)
+                st.session_state["route"] = [selected[i] for i in route]
+                total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
+                # 実際の経路ラインも取得
+                full_path = []
+                for i in range(len(route)-1):
+                    try:
+                        seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
+                        seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
+                        if i != 0:
+                            seg_coords = seg_coords[1:]
+                        full_path.extend(seg_coords)
+                    except Exception as e:
+                        st.error(f"経路描画エラー: {e}")
+                        continue
+                st.session_state["road_path"] = full_path
+                st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
+
+# --- 地図（必ず最新状態で描画） ---
 st.markdown("## 🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）")
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
@@ -241,7 +304,6 @@ layer_text = pdk.Layer(
     pickable=False,
 )
 layers = [layer_pts, layer_text]
-
 road_path = st.session_state.get("road_path", [])
 if road_path and len(road_path) > 1:
     layer_line = pdk.Layer(
@@ -270,62 +332,11 @@ st.pydeck_chart(pdk.Deck(
     tooltip={"text": f"{{{st.session_state['label_col']}}}"}
 ), use_container_width=True)
 
-# 施設選択（チェックボックス） - フォームを正しく使用
-st.markdown("## 📋 巡回施設の選択")
+# --- データ一覧もexpanderで表示 ---
 if not shelters_df.empty:
-    with st.form("facility_selector"):
-        st.subheader("避難所リスト")
-        selected_flags = []
-        default_selected = set(st.session_state["selected"])
-        for idx, row in shelters_df.iterrows():
-            checked = st.checkbox(
-                f"{row[st.session_state['label_col']]} ({row['lat']:.5f},{row['lon']:.5f})",
-                value=(idx in default_selected),
-                key=f"cb_{idx}"
-            )
-            selected_flags.append(checked)
-        submitted = st.form_submit_button("選択確定")
-        if submitted:
-            st.session_state["selected"] = [i for i, flag in enumerate(selected_flags) if flag]
+    with st.expander("📋 避難所データ一覧・巡回順（クリックで開閉）"):
+        st.dataframe(shelters_df)
+        if st.session_state.get("route") and all(i < len(shelters_df) for i in st.session_state["route"]):
+            st.write("巡回順（0起点）:", [shelters_df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
 else:
-    st.info("避難所データをまずアップロード・追加してください。")
-
-# 道路ネットワークTSP
-st.markdown("## 🚩 道路を使った最短巡回ルート計算")
-mode_disp = st.selectbox("道路種別", ["車（drive推奨）", "徒歩（歩道のみ）"], index=0)
-ox_mode = "drive" if "車" in mode_disp else "walk"
-if st.button("道路でTSP最短巡回ルート計算"):
-    selected = st.session_state["selected"]
-    if not selected or len(selected) < 2:
-        st.warning("最低2か所以上の避難所を選択してください。")
-    else:
-        df = shelters_df.iloc[selected].reset_index(drop=True)
-        locs = list(zip(df["lat"], df["lon"]))
-        with st.spinner("OSM道路情報を取得＆巡回ルートを計算中...（通信状況により数秒かかります）"):
-            distmat, G, node_ids = create_road_distance_matrix(locs, mode=ox_mode)
-            if np.any(np.isinf(distmat)):
-                st.error("一部の避難所間で道路がつながっていません。別の組合せで試してください。")
-            else:
-                route = solve_tsp(distmat)
-                st.session_state["route"] = [selected[i] for i in route]
-                total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1)])
-                # 実際の経路ラインも取得
-                full_path = []
-                for i in range(len(route)-1):
-                    try:
-                        seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
-                        seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
-                        if i != 0:
-                            seg_coords = seg_coords[1:]
-                        full_path.extend(seg_coords)
-                    except Exception as e:
-                        st.error(f"経路描画エラー: {e}")
-                        continue
-                st.session_state["road_path"] = full_path
-                st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
-
-# 折りたたみ表示
-with st.expander("📋 避難所データ一覧・巡回順（クリックで開閉）", expanded=False):
-    st.dataframe(shelters_df)
-    if st.session_state.get("route") and all(i < len(shelters_df) for i in st.session_state["route"]):
-        st.write("巡回順（0起点）:", [shelters_df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
+    st.info("避難所データがありません。")
