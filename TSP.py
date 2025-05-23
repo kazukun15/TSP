@@ -82,16 +82,18 @@ def file_to_df(uploaded_files):
         st.error(f"ファイル読み込みエラー: {e}")
         return pd.DataFrame(columns=["lat", "lon", "name"])
 
+# ==== graph_from_bboxの修正版（引数は順番で！）====
 def create_road_distance_matrix(locs, mode="drive"):
     try:
         locs = [(float(lat), float(lon)) for lat, lon in locs]
         lats = [p[0] for p in locs]
         lons = [p[1] for p in locs]
+        # graph_from_bbox(north, south, east, west, network_type)
         G = ox.graph_from_bbox(
-            north=max(lats) + 0.01,
-            south=min(lats) - 0.01,
-            east=max(lons) + 0.01,
-            west=min(lons) - 0.01,
+            max(lats) + 0.01,
+            min(lats) - 0.01,
+            max(lons) + 0.01,
+            min(lons) - 0.01,
             network_type=mode
         )
         node_ids = []
@@ -142,11 +144,9 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
-# === 初期避難所データをGeoJSONからロード ===
 def load_initial_geojson(filepath):
     try:
         gdf = gpd.read_file(filepath)
-        # EPSG自動変換
         if gdf.crs is None:
             gdf.set_crs(epsg=4326, inplace=True)
         elif gdf.crs.to_epsg() != 4326:
@@ -166,23 +166,20 @@ def load_initial_geojson(filepath):
         st.error(f"初期GeoJSON読み込みエラー: {e}")
         return pd.DataFrame(columns=["lat", "lon", "name"])
 
-# === 初回起動時のみ初期データロード ===
 if "shelters" not in st.session_state:
     geojson_path = "hinanjyo.geojson"
     st.session_state["shelters"] = load_initial_geojson(geojson_path)
 
-if "selected" not in st.session_state:
-    st.session_state["selected"] = []
-if "route" not in st.session_state:
-    st.session_state["route"] = []
-if "road_path" not in st.session_state:
-    st.session_state["road_path"] = []
 if "label_col" not in st.session_state:
     st.session_state["label_col"] = "name"
 if "map_style" not in st.session_state:
     st.session_state["map_style"] = "light"
 if "ox_mode" not in st.session_state:
     st.session_state["ox_mode"] = "drive"
+if "route" not in st.session_state:
+    st.session_state["route"] = []
+if "road_path" not in st.session_state:
+    st.session_state["road_path"] = []
 
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
 st.sidebar.info(
@@ -216,7 +213,6 @@ with st.sidebar.form(key="manual_add"):
 
 if st.sidebar.button("すべて削除"):
     st.session_state["shelters"] = load_initial_geojson("hinanjyo.geojson")
-    st.session_state["selected"] = []
     st.session_state["route"] = []
     st.session_state["road_path"] = []
     st.session_state["label_col"] = "name"
@@ -224,7 +220,7 @@ if st.sidebar.button("すべて削除"):
 csv_export = st.session_state["shelters"].to_csv(index=False)
 st.sidebar.download_button("避難所CSVをダウンロード", csv_export, file_name="shelters.csv", mime="text/csv")
 
-# --- サイドバー：道路種別・TSPルート計算をまとめてフォーム化 ---
+# サイドバー：道路種別・TSPルート計算まとめてフォーム
 with st.sidebar.form("tsp_form"):
     st.markdown("---")
     st.header("TSPルート計算")
@@ -232,7 +228,6 @@ with st.sidebar.form("tsp_form"):
     st.session_state["ox_mode"] = "drive" if "車" in mode_disp else "walk"
     tsp_btn = st.form_submit_button("道路でTSP最短巡回ルート計算")
 
-# メインUI
 shelters_df = st.session_state["shelters"].copy()
 shelters_df["lat"] = pd.to_numeric(shelters_df["lat"], errors="coerce")
 shelters_df["lon"] = pd.to_numeric(shelters_df["lon"], errors="coerce")
@@ -262,7 +257,7 @@ st.session_state["map_style"] = style_name
 
 shelters_df = shelters_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 
-# --- 巡回施設選択：マルチセレクト方式（超大量施設も快適） ---
+# --- 巡回施設選択：session_state管理からst.multiselectのkey管理へ ---
 st.markdown("## 📋 巡回施設の選択")
 if not shelters_df.empty:
     display_names = [
@@ -270,20 +265,19 @@ if not shelters_df.empty:
         for _, row in shelters_df.iterrows()
     ]
     idx_to_name = {i: name for i, name in enumerate(display_names)}
-    selected_idx = st.multiselect(
+    # ここでdefaultは使わず、key管理だけにする
+    st.multiselect(
         "巡回対象にする施設を選択（複数選択可）",
         options=list(idx_to_name.keys()),
         format_func=lambda x: idx_to_name[x],
-        default=st.session_state["selected"],
         key="multiselect_tsp"
     )
-    st.session_state["selected"] = selected_idx
 else:
     st.info("避難所データをまずアップロード・追加してください。")
 
 # --- TSPボタンが押されたら処理 ---
 if tsp_btn:
-    selected = st.session_state["selected"]
+    selected = st.session_state.get("multiselect_tsp", [])
     if not selected or len(selected) < 2:
         st.warning("最低2か所以上の避難所を選択してください。")
         st.session_state["road_path"] = []
@@ -316,7 +310,7 @@ if tsp_btn:
                 st.session_state["road_path"] = full_path
                 st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
 
-# --- 地図（必ず最新状態で描画） ---
+# --- 地図 ---
 st.markdown("## 🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）")
 layer_pts = pdk.Layer(
     "ScatterplotLayer",
