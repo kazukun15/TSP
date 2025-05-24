@@ -82,46 +82,59 @@ def file_to_df(uploaded_files):
         return pd.DataFrame(columns=["lat", "lon", "name"])
 
 def create_road_distance_matrix(locs, mode="drive"):
-    locs = [(float(lat), float(lon)) for lat, lon in locs]
-    lats = [p[0] for p in locs]
-    lons = [p[1] for p in locs]
+    import networkx as nx
+    import numpy as np
+    import osmnx as ox
+    lats = [float(p[0]) for p in locs]
+    lons = [float(p[1]) for p in locs]
     version = packaging.version.parse(ox.__version__)
-    try:
-        if version < packaging.version.parse("2.0.0"):
-            G = ox.graph_from_bbox(
-                max(lats) + 0.01,
-                min(lats) - 0.01,
-                max(lons) + 0.01,
-                min(lons) - 0.01,
-                network_type=mode
-            )
-        else:
-            bbox = (max(lats) + 0.01, min(lats) - 0.01, max(lons) + 0.01, min(lons) - 0.01)
-            G = ox.graph_from_bbox(bbox=bbox, network_type=mode)
-        node_ids = []
-        for lat, lon in locs:
-            try:
-                node_id = ox.nearest_nodes(G, lon, lat)
-                node_ids.append(node_id)
-            except Exception:
-                node_ids.append(None)
-        n = len(locs)
-        mat = np.zeros((n, n))
-        for i in range(n):
-            for j in range(n):
-                if i == j:
-                    mat[i, j] = 0
-                elif node_ids[i] is not None and node_ids[j] is not None:
-                    try:
-                        mat[i, j] = nx.shortest_path_length(G, node_ids[i], node_ids[j], weight='length') / 1000
-                    except (nx.NetworkXNoPath, nx.NodeNotFound):
+    for pad in [0.01, 0.03, 0.07]:  # 段階的に範囲を広げてみる
+        try:
+            if version < packaging.version.parse("2.0.0"):
+                G = ox.graph_from_bbox(
+                    max(lats) + pad, min(lats) - pad,
+                    max(lons) + pad, min(lons) - pad,
+                    network_type=mode
+                )
+            else:
+                bbox = (max(lats) + pad, min(lats) - pad, max(lons) + pad, min(lons) - pad)
+                G = ox.graph_from_bbox(bbox=bbox, network_type=mode)
+            if len(G.nodes) == 0:
+                continue
+            node_ids = []
+            for lat, lon in locs:
+                try:
+                    node_id = ox.nearest_nodes(G, lon, lat)
+                    node_ids.append(node_id)
+                except Exception:
+                    node_ids.append(None)
+            n = len(locs)
+            mat = np.zeros((n, n))
+            for i in range(n):
+                for j in range(n):
+                    if i == j:
+                        mat[i, j] = 0
+                    elif node_ids[i] is not None and node_ids[j] is not None:
+                        try:
+                            mat[i, j] = nx.shortest_path_length(G, node_ids[i], node_ids[j], weight='length') / 1000
+                        except (nx.NetworkXNoPath, nx.NodeNotFound):
+                            mat[i, j] = float('inf')
+                    else:
                         mat[i, j] = float('inf')
-                else:
-                    mat[i, j] = float('inf')
-        return mat, G, node_ids
-    except Exception as e:
-        st.error(f"道路ネットワーク構築エラー: {e}")
-        return np.zeros((len(locs),len(locs))), None, []
+            return mat, G, node_ids
+        except Exception:
+            continue
+    # ここまで全部失敗したら「直線距離TSP」で代替
+    st.warning("道路ネットワークを取得できませんでした。直線距離でTSP巡回します。")
+    n = len(locs)
+    mat = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                mat[i, j] = 0
+            else:
+                mat[i, j] = np.linalg.norm(np.array(locs[i]) - np.array(locs[j]))
+    return mat, None, []
 
 def solve_tsp(distance_matrix):
     size = len(distance_matrix)
@@ -302,80 +315,26 @@ if tsp_btn:
                 total = sum([distmat[route[i], route[i+1]] for i in range(len(route)-1) if route[i]<len(distmat) and route[i+1]<len(distmat)])
                 # 実際の経路ラインも取得
                 full_path = []
-                for i in range(len(route)-1):
-                    try:
-                        if node_ids[route[i]] is not None and node_ids[route[i+1]] is not None:
-                            seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
-                            seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
-                            if i != 0:
-                                seg_coords = seg_coords[1:]
-                            full_path.extend(seg_coords)
-                    except Exception as e:
-                        st.error(f"経路描画エラー: {e}")
-                        continue
+                if G is not None and node_ids:
+                    for i in range(len(route)-1):
+                        try:
+                            if node_ids[route[i]] is not None and node_ids[route[i+1]] is not None:
+                                seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight='length')
+                                seg_coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
+                                if i != 0:
+                                    seg_coords = seg_coords[1:]
+                                full_path.extend(seg_coords)
+                        except Exception as e:
+                            st.error(f"経路描画エラー: {e}")
+                            continue
+                else:
+                    # 直線距離の場合は点列を直線でつなぐ
+                    for i in range(len(route)-1):
+                        full_path.append([df.loc[route[i], "lon"], df.loc[route[i], "lat"]])
+                        full_path.append([df.loc[route[i+1], "lon"], df.loc[route[i+1], "lat"]])
                 st.session_state["road_path"] = full_path
                 st.success(f"巡回ルート計算完了！総距離: {total:.2f} km（道路距離）")
 
 # --- 地図（小さい見出し） ---
 st.markdown(
-    "<span style='font-size:14px;'>🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）</span>",
-    unsafe_allow_html=True
-)
-layer_pts = pdk.Layer(
-    "ScatterplotLayer",
-    data=shelters_df,
-    get_position='[lon, lat]',
-    get_color='[0, 150, 255, 200]',
-    get_radius=40,
-    radius_min_pixels=1,
-    radius_max_pixels=6,
-    pickable=True,
-)
-layer_text = pdk.Layer(
-    "TextLayer",
-    data=shelters_df,
-    get_position='[lon, lat]',
-    get_text=st.session_state["label_col"],
-    get_size=15,
-    get_color=[20, 20, 40, 180],
-    get_angle=0,
-    get_alignment_baseline="'bottom'",
-    pickable=False,
-)
-layers = [layer_pts, layer_text]
-road_path = st.session_state.get("road_path", [])
-if road_path and len(road_path) > 1:
-    layer_line = pdk.Layer(
-        "PathLayer",
-        data=pd.DataFrame({"path": [road_path]}),
-        get_path="path",
-        get_color=[255, 60, 60, 200],
-        width_scale=10,
-        width_min_pixels=4,
-        width_max_pixels=10,
-        pickable=False,
-    )
-    layers.append(layer_line)
-
-view = pdk.ViewState(
-    latitude=KAMIJIMA_CENTER[0],
-    longitude=KAMIJIMA_CENTER[1],
-    zoom=13.3,
-    pitch=45,
-    bearing=0,
-)
-st.pydeck_chart(pdk.Deck(
-    map_style=map_style_dict[st.session_state["map_style"]],
-    layers=layers,
-    initial_view_state=view,
-    tooltip={"text": f"{{{st.session_state['label_col']}}}"}
-), use_container_width=True)
-
-# --- データ一覧もexpanderで表示 ---
-if not shelters_df.empty:
-    with st.expander("📋 避難所データ一覧・巡回順（クリックで開閉）"):
-        st.dataframe(shelters_df)
-        if st.session_state.get("route") and all(i < len(shelters_df) for i in st.session_state["route"]):
-            st.write("巡回順（0起点）:", [shelters_df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
-else:
-    st.info("避難所データがありません。")
+    "<span style='font-size:14px;'>🗺️ 地図（全避難所ラベル
