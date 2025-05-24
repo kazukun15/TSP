@@ -88,7 +88,7 @@ def create_road_distance_matrix(locs, mode="drive"):
     lats = [float(p[0]) for p in locs]
     lons = [float(p[1]) for p in locs]
     version = packaging.version.parse(ox.__version__)
-    for pad in [0.01, 0.03, 0.07]:  # 段階的に範囲を広げてみる
+    for pad in [0.01, 0.03, 0.07]:
         try:
             if version < packaging.version.parse("2.0.0"):
                 G = ox.graph_from_bbox(
@@ -124,7 +124,6 @@ def create_road_distance_matrix(locs, mode="drive"):
             return mat, G, node_ids
         except Exception:
             continue
-    # ここまで全部失敗したら「直線距離TSP」で代替
     st.warning("道路ネットワークを取得できませんでした。直線距離でTSP巡回します。")
     n = len(locs)
     mat = np.zeros((n, n))
@@ -147,7 +146,7 @@ def solve_tsp(distance_matrix):
     transit_callback_index = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.time_limit.seconds = 1  # 1秒で打ち切り（高速化！）
+    search_parameters.time_limit.seconds = 1
     search_parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     )
@@ -337,4 +336,11 @@ if tsp_btn:
 
 # --- 地図（小さい見出し） ---
 st.markdown(
-    "<span style='font-size:14px;'>🗺️ 地図（全避難所ラベル
+    "<span style='font-size:14px;'>🗺️ 地図（全避難所ラベル付き・TSP道路ルート表示）</span>",
+    unsafe_allow_html=True
+)
+
+layer_pts = pdk.Layer(
+    "ScatterplotLayer",
+    data=shelters_df,
+   
