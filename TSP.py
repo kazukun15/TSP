@@ -30,8 +30,7 @@ def guess_name_col(df):
     for cand in ["name","NAME","名称","避難所","施設名","address","住所"]:
         if cand in df.columns:
             return cand
-    obj = [c for c in df.columns if df[c].dtype=='O']
-    return obj[0] if obj else (df.columns[0] if not df.empty else "name")
+    return df.columns[0] if not df.empty else "name"
 
 def file_to_df(uploaded_files):
     try:
@@ -57,10 +56,12 @@ def file_to_df(uploaded_files):
         else:
             st.warning("対応形式：SHP一式/GeoJSON/CSVのみ")
             return pd.DataFrame(columns=["lat","lon","name"])
+        # GeoDataFrame の EPSG を4326に統一
         if gdf.crs is None:
             gdf.set_crs(epsg=4326,inplace=True)
         elif gdf.crs.to_epsg()!=4326:
             gdf = gdf.to_crs(epsg=4326)
+        # Point 型のみ
         gdf = gdf[gdf.geometry.type=="Point"]
         gdf["lon"]=gdf.geometry.x; gdf["lat"]=gdf.geometry.y
         if "name" not in gdf.columns:
@@ -102,16 +103,20 @@ def create_road_distance_matrix(locs, mode="drive"):
                 G=ox.graph_from_bbox(bbox=bbox, network_type=mode)
             if not G.nodes:
                 continue
-            node_ids=[ None if not ox.get_nearest_node or True else ox.nearest_nodes(G,lon,lat)
-                       for lat,lon in locs ]
+            node_ids=[]
+            for lat,lon in locs:
+                try:
+                    node_ids.append(ox.nearest_nodes(G,lon,lat))
+                except:
+                    node_ids.append(None)
             n=len(locs); mat=np.zeros((n,n))
             for i in range(n):
                 for j in range(n):
                     if i==j: continue
-                    nid_i=node_ids[i]; nid_j=node_ids[j]
-                    if nid_i is not None and nid_j is not None:
+                    ni, nj = node_ids[i], node_ids[j]
+                    if ni is not None and nj is not None:
                         try:
-                            mat[i,j]=nx.shortest_path_length(G,nid_i,nid_j,weight="length")/1000
+                            mat[i,j]=nx.shortest_path_length(G,ni,nj,weight="length")/1000
                         except:
                             mat[i,j]=float("inf")
                     else:
@@ -124,7 +129,7 @@ def create_road_distance_matrix(locs, mode="drive"):
     for i in range(n):
         for j in range(n):
             if i!=j:
-                mat[i,j]=np.linalg.norm(np.array(locs[i]) - np.array(locs[j]))
+                mat[i,j]=np.linalg.norm(np.array(locs[i])-np.array(locs[j]))
     return mat,None,[]
 
 def solve_tsp(distance_matrix):
@@ -148,16 +153,17 @@ def solve_tsp(distance_matrix):
     return route
 
 # ── セッションステート初期化 ─────────────────────────────────────────
-for key,default in {
+defaults={
     "shelters": load_initial_geojson(),
     "label_col":"name",
     "map_style":"light",
     "ox_mode":"drive",
     "road_path":[],
     "route":[]
-}.items():
-    if key not in st.session_state:
-        st.session_state[key]=default
+}
+for k,v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k]=v
 
 # ── サイドバー：データ追加 & TSPフォーム ─────────────────────────
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
@@ -169,12 +175,13 @@ if up:
         st.session_state["shelters"]=pd.concat([st.session_state["shelters"],gdf],ignore_index=True)
         st.success(f"{len(gdf)}件追加")
         st.session_state["label_col"]=guess_name_col(st.session_state["shelters"])
-with st.sidebar.form("manual"):
+with st.sidebar.form("manual_add"):
     lat=st.number_input("緯度",value=KAMIJIMA_CENTER[0],format="%f")
     lon=st.number_input("経度",value=KAMIJIMA_CENTER[1],format="%f")
     nm=st.text_input("避難所名","新しい避難所")
     if st.form_submit_button("手動追加"):
-        st.session_state["shelters"]=pd.concat([st.session_state["shelters"],
+        st.session_state["shelters"]=pd.concat([
+            st.session_state["shelters"],
             pd.DataFrame([{"lat":lat,"lon":lon,"name":nm}])
         ],ignore_index=True)
 if st.sidebar.button("リセット"):
@@ -182,127 +189,89 @@ if st.sidebar.button("リセット"):
     st.session_state["road_path"]=[]
     st.session_state["route"]=[]
     st.session_state["label_col"]="name"
-download = st.session_state["shelters"].to_csv(index=False)
+download=st.session_state["shelters"].to_csv(index=False)
 st.sidebar.download_button("CSVダウンロード",download,"shelters.csv","text/csv")
 
-with st.sidebar.form("tsp"):
+with st.sidebar.form("tsp_form"):
     st.markdown("---")
     st.header("TSPルート計算")
-    md=st.selectbox("道路種別",["車（drive）","徒歩（walk）"])
-    st.session_state["ox_mode"]="drive" if "車" in md else "walk"
+    mode_disp=st.selectbox("道路種別",["車（drive）","徒歩（walk）"])
+    st.session_state["ox_mode"]="drive" if "車" in mode_disp else "walk"
     calc_btn=st.form_submit_button("計算スタート")
 
-# ── メイン画面：選択→計算→地図表示 ─────────────────────────────────
-df = st.session_state["shelters"].copy()
+# ── メイン画面：施設選択・計算・地図描画 ─────────────────────────────────
+df=st.session_state["shelters"].copy()
 df["lat"]=pd.to_numeric(df["lat"],errors="coerce")
 df["lon"]=pd.to_numeric(df["lon"],errors="coerce")
 
-# ラベル列選択
-label_opts=[c for c in df.columns if df[c].dtype=="O"]
-if not label_opts: label_opts=["name"]
-st.session_state["label_col"] = st.selectbox(
+# ★ すべてのカラムをラベル選択肢に
+label_opts=list(df.columns)
+st.session_state["label_col"]=st.selectbox(
     "ラベル列", label_opts,
     index=label_opts.index(st.session_state["label_col"])
 )
 
 # 地図スタイル辞書
-map_style_dict = {
-    "light": "light",
-    "dark": "dark",
-    "ストリート": "mapbox://styles/mapbox/streets-v12",
-    "衛星写真": "mapbox://styles/mapbox/satellite-streets-v12",
-    "アウトドア": "mapbox://styles/mapbox/outdoors-v12",
-    "ナビ風": "mapbox://styles/mapbox/navigation-night-v1"
+map_style_dict={
+    "light":"light","dark":"dark",
+    "ストリート":"mapbox://styles/mapbox/streets-v12",
+    "衛星写真":"mapbox://styles/mapbox/satellite-streets-v12",
+    "アウトドア":"mapbox://styles/mapbox/outdoors-v12",
+    "ナビ風":"mapbox://styles/mapbox/navigation-night-v1"
 }
-# 地図背景スタイル選択
-st.session_state["map_style"] = st.selectbox(
+st.session_state["map_style"]=st.selectbox(
     "地図背景スタイル", list(map_style_dict.keys()),
     index=list(map_style_dict.keys()).index(st.session_state["map_style"])
 )
 
-# 巡回施設選択
-display = [f"{r[st.session_state['label_col']]}({r['lat']:.5f},{r['lon']:.5f})"
-           for _,r in df.iterrows()]
-idx_map = {i:name for i,name in enumerate(display)}
-st.markdown("<span style='font-size:14px;'>📋 巡回施設の選択</span>", unsafe_allow_html=True)
-sel = st.multiselect(
-    "選択", options=list(idx_map),
-    format_func=lambda x: idx_map[x],
-    key="sel"
-)
+# 施設リスト表示と選択
+display=[f"{r[st.session_state['label_col']]}({r['lat']:.5f},{r['lon']:.5f})" for _,r in df.iterrows()]
+idx_map={i:n for i,n in enumerate(display)}
+st.markdown("<span style='font-size:14px;'>📋 巡回施設の選択</span>",unsafe_allow_html=True)
+sel=st.multiselect("選択",options=list(idx_map),format_func=lambda x:idx_map[x],key="sel")
 
 # 計算実行
 if calc_btn:
     if len(sel)<2:
         st.warning("2か所以上選択してください")
     else:
-        sub = df.iloc[sel].reset_index(drop=True)
-        locs = list(zip(sub["lat"], sub["lon"]))
+        sub=df.iloc[sel].reset_index(drop=True)
+        locs=list(zip(sub["lat"],sub["lon"]))
         with st.spinner("計算中…"):
-            distmat, G, node_ids = create_road_distance_matrix(locs, mode=st.session_state["ox_mode"])
-            route = solve_tsp(distmat)
-            st.session_state["route"] = [sel[i] for i in route if i < len(sel)]
+            distmat,G,node_ids=create_road_distance_matrix(locs,mode=st.session_state["ox_mode"])
+            route=solve_tsp(distmat)
+            st.session_state["route"]=[sel[i] for i in route if i<len(sel)]
             # 経路描画座標
-            path = []
+            path=[]
             if G and node_ids:
                 for i in range(len(route)-1):
-                    seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight="length")
-                    coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
-                    path += coords if i==0 else coords[1:]
+                    seg=nx.shortest_path(G,node_ids[route[i]],node_ids[route[i+1]],weight="length")
+                    coords=[[G.nodes[n]["x"],G.nodes[n]["y"]] for n in seg]
+                    path+=coords if i==0 else coords[1:]
             else:
                 for i in range(len(route)-1):
-                    path.append([sub.loc[route[i],"lon"], sub.loc[route[i],"lat"]])
-                    path.append([sub.loc[route[i+1],"lon"], sub.loc[route[i+1],"lat"]])
-            st.session_state["road_path"] = path
-            total = sum(distmat[route[i],route[i+1]] for i in range(len(route)-1))
+                    path.append([sub.loc[route[i],"lon"],sub.loc[route[i],"lat"]])
+                    path.append([sub.loc[route[i+1],"lon"],sub.loc[route[i+1],"lat"]])
+            st.session_state["road_path"]=path
+            total=sum(distmat[route[i],route[i+1]] for i in range(len(route)-1))
             st.success(f"計算完了！総距離: {total:.2f} km")
 
-# ── 地図描画 ─────────────────────────────────────────────────────
-st.markdown("<span style='font-size:14px;'>🗺️ 地図（ラベル＋TSPルート）</span>", unsafe_allow_html=True)
-
-layer_pts = pdk.Layer(
-    "ScatterplotLayer", data=df,
-    get_position='[lon,lat]', get_color='[0,150,255,200]',
-    get_radius=40, radius_min_pixels=1, radius_max_pixels=6,
-    pickable=True
-)
-layer_text = pdk.Layer(
-    "TextLayer", data=df,
-    get_position='[lon,lat]',
-    get_text=st.session_state["label_col"],
-    get_size=15, get_color=[20,20,40,180],
-    get_alignment_baseline="'bottom'", pickable=False
-)
-layers = [layer_pts, layer_text]
-rp = st.session_state["road_path"]
+# 地図描画
+st.markdown("<span style='font-size:14px;'>🗺️ 地図（ラベル＋TSPルート）</span>",unsafe_allow_html=True)
+layer_pts=pdk.Layer("ScatterplotLayer",data=df,get_position='[lon,lat]',get_color='[0,150,255,200]',get_radius=40,radius_min_pixels=1,radius_max_pixels=6,pickable=True)
+layer_text=pdk.Layer("TextLayer",data=df,get_position='[lon,lat]',get_text=st.session_state["label_col"],get_size=15,get_color=[20,20,40,180],get_alignment_baseline="'bottom'",pickable=False)
+layers=[layer_pts,layer_text]
+rp=st.session_state["road_path"]
 if rp and len(rp)>1:
-    layers.append(pdk.Layer(
-        "PathLayer", data=pd.DataFrame({"path":[rp]}),
-        get_path="path", get_color=[255,60,60,200],
-        width_scale=10, width_min_pixels=4, pickable=False
-    ))
-view = pdk.ViewState(
-    latitude=KAMIJIMA_CENTER[0], longitude=KAMIJIMA_CENTER[1],
-    zoom=13.3, pitch=45, bearing=0
-)
-st.pydeck_chart(
-    pdk.Deck(
-        map_style=map_style_dict[st.session_state["map_style"]],
-        layers=layers,
-        initial_view_state=view,
-        tooltip={"text": f"{{{st.session_state['label_col']}}}"}
-    ),
-    use_container_width=True
-)
+    layers.append(pdk.Layer("PathLayer",data=pd.DataFrame({"path":[rp]}),get_path="path",get_color=[255,60,60,200],width_scale=10,width_min_pixels=4,pickable=False))
+view=pdk.ViewState(latitude=KAMIJIMA_CENTER[0],longitude=KAMIJIMA_CENTER[1],zoom=13.3,pitch=45,bearing=0)
+st.pydeck_chart(pdk.Deck(map_style=map_style_dict[st.session_state["map_style"]],layers=layers,initial_view_state=view,tooltip={"text":f"{{{st.session_state['label_col']}}}"}),use_container_width=True)
 
 # データ一覧 expander
 if not df.empty:
     with st.expander("📋 避難所一覧・巡回順"):
         st.dataframe(df)
         if st.session_state["route"]:
-            st.write(
-                "巡回順:",
-                [df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]]
-            )
+            st.write("巡回順:",[df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
 else:
     st.info("避難所データがありません")
