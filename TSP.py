@@ -34,9 +34,7 @@ def guess_name_col(df):
     return obj[0] if obj else (df.columns[0] if not df.empty else "name")
 
 def file_to_df(uploaded_files):
-    """SHP/GeoJSON/CSV→DataFrame(Point抽出)"""
     try:
-        # SHP一式
         if any(f.name.endswith(".shp") for f in uploaded_files):
             import tempfile
             with tempfile.TemporaryDirectory() as td:
@@ -44,11 +42,9 @@ def file_to_df(uploaded_files):
                     open(os.path.join(td,f.name),"wb").write(f.getvalue())
                 shp = [os.path.join(td,f.name) for f in uploaded_files if f.name.endswith(".shp")][0]
                 gdf = gpd.read_file(shp)
-        # GeoJSON/JSON
         elif any(f.name.endswith((".geojson",".json")) for f in uploaded_files):
             f = [f for f in uploaded_files if f.name.endswith((".geojson",".json"))][0]
             gdf = gpd.read_file(f)
-        # CSV
         elif any(f.name.endswith(".csv") for f in uploaded_files):
             f = [f for f in uploaded_files if f.name.endswith(".csv")][0]
             df = pd.read_csv(f)
@@ -61,12 +57,10 @@ def file_to_df(uploaded_files):
         else:
             st.warning("対応形式：SHP一式/GeoJSON/CSVのみ")
             return pd.DataFrame(columns=["lat","lon","name"])
-        # CRS→4326
         if gdf.crs is None:
             gdf.set_crs(epsg=4326,inplace=True)
         elif gdf.crs.to_epsg()!=4326:
             gdf = gdf.to_crs(epsg=4326)
-        # Point のみ
         gdf = gdf[gdf.geometry.type=="Point"]
         gdf["lon"]=gdf.geometry.x; gdf["lat"]=gdf.geometry.y
         if "name" not in gdf.columns:
@@ -77,16 +71,13 @@ def file_to_df(uploaded_files):
         return pd.DataFrame(columns=["lat","lon","name"])
 
 def load_initial_geojson():
-    """ローカル or GitHub Raw → GeoDataFrame"""
     try:
         path = GEOJSON_LOCAL_PATH if os.path.exists(GEOJSON_LOCAL_PATH) else GEOJSON_RAW_URL
         gdf = gpd.read_file(path)
-        # CRS 4326
         if gdf.crs is None:
             gdf.set_crs(epsg=4326,inplace=True)
         elif gdf.crs.to_epsg()!=4326:
             gdf = gdf.to_crs(epsg=4326)
-        # Point 型
         gdf = gdf[gdf.geometry.type=="Point"]
         gdf["lon"]=gdf.geometry.x; gdf["lat"]=gdf.geometry.y
         if "name" not in gdf.columns:
@@ -97,7 +88,6 @@ def load_initial_geojson():
         return pd.DataFrame(columns=["lat","lon","name"])
 
 def create_road_distance_matrix(locs, mode="drive"):
-    """OSM道路ネットワーク取得→距離行列 or 直線距離フォールバック"""
     import numpy as np
     version = packaging.version.parse(ox.__version__)
     lats=[float(p[0]) for p in locs]; lons=[float(p[1]) for p in locs]
@@ -112,39 +102,36 @@ def create_road_distance_matrix(locs, mode="drive"):
                 G=ox.graph_from_bbox(bbox=bbox, network_type=mode)
             if not G.nodes:
                 continue
-            node_ids=[]
-            for lat,lon in locs:
-                try: nid=ox.nearest_nodes(G,lon,lat)
-                except: nid=None
-                node_ids.append(nid)
+            node_ids=[ None if not ox.get_nearest_node or True else ox.nearest_nodes(G,lon,lat)
+                       for lat,lon in locs ]
             n=len(locs); mat=np.zeros((n,n))
             for i in range(n):
                 for j in range(n):
                     if i==j: continue
-                    if node_ids[i] is not None and node_ids[j] is not None:
+                    nid_i=node_ids[i]; nid_j=node_ids[j]
+                    if nid_i is not None and nid_j is not None:
                         try:
-                            d=nx.shortest_path_length(G,node_ids[i],node_ids[j],weight="length")/1000
-                        except: d=float("inf")
-                    else: d=float("inf")
-                    mat[i,j]=d
+                            mat[i,j]=nx.shortest_path_length(G,nid_i,nid_j,weight="length")/1000
+                        except:
+                            mat[i,j]=float("inf")
+                    else:
+                        mat[i,j]=float("inf")
             return mat, G, node_ids
         except:
             continue
-    # フォールバック：直線距離
     st.warning("道路データ取得失敗→直線距離TSPに切替")
     n=len(locs); mat=np.zeros((n,n))
     for i in range(n):
         for j in range(n):
             if i!=j:
                 mat[i,j]=np.linalg.norm(np.array(locs[i]) - np.array(locs[j]))
-    return mat, None, []
+    return mat,None,[]
 
 def solve_tsp(distance_matrix):
-    size=len(distance_matrix)
-    mgr=pywrapcp.RoutingIndexManager(size,1,0)
+    mgr=pywrapcp.RoutingIndexManager(len(distance_matrix),1,0)
     routing=pywrapcp.RoutingModel(mgr)
-    def cb(f,t):
-        return int(distance_matrix[mgr.IndexToNode(f), mgr.IndexToNode(t)]*100000)
+    def cb(fi,ti):
+        return int(distance_matrix[mgr.IndexToNode(fi),mgr.IndexToNode(ti)]*100000)
     idx_cb=routing.RegisterTransitCallback(cb)
     routing.SetArcCostEvaluatorOfAllVehicles(idx_cb)
     params=pywrapcp.DefaultRoutingSearchParameters()
@@ -160,23 +147,21 @@ def solve_tsp(distance_matrix):
         route.append(route[0])
     return route
 
-# ── 初期データ ───────────────────────────────────────────────
-if "shelters" not in st.session_state:
-    st.session_state["shelters"]=load_initial_geojson()
-if "label_col" not in st.session_state:
-    st.session_state["label_col"]="name"
-if "map_style" not in st.session_state:
-    st.session_state["map_style"]="light"
-if "ox_mode" not in st.session_state:
-    st.session_state["ox_mode"]="drive"
-if "road_path" not in st.session_state:
-    st.session_state["road_path"]=[]
-if "route" not in st.session_state:
-    st.session_state["route"]=[]
+# ── セッションステート初期化 ─────────────────────────────────────────
+for key,default in {
+    "shelters": load_initial_geojson(),
+    "label_col":"name",
+    "map_style":"light",
+    "ox_mode":"drive",
+    "road_path":[],
+    "route":[]
+}.items():
+    if key not in st.session_state:
+        st.session_state[key]=default
 
-# ── サイドバー：データ追加・TSPフォーム ─────────────────────────
+# ── サイドバー：データ追加 & TSPフォーム ─────────────────────────
 st.sidebar.header("避難所データ追加 (SHP/GeoJSON/CSV)")
-st.sidebar.info("ファイルはスマホ→ファイルアプリから選択OK\nSHP一式 or GeoJSON/CSV")
+st.sidebar.info("スマホ→ファイルアプリ→選択でOK\nSHP一式 or GeoJSON/CSV")
 up=st.sidebar.file_uploader("アップロード",type=["shp","shx","dbf","prj","geojson","json","csv"],accept_multiple_files=True)
 if up:
     gdf=file_to_df(up)
@@ -189,14 +174,16 @@ with st.sidebar.form("manual"):
     lon=st.number_input("経度",value=KAMIJIMA_CENTER[1],format="%f")
     nm=st.text_input("避難所名","新しい避難所")
     if st.form_submit_button("手動追加"):
-        st.session_state["shelters"]=pd.concat([st.session_state["shelters"],pd.DataFrame([{"lat":lat,"lon":lon,"name":nm}])],ignore_index=True)
+        st.session_state["shelters"]=pd.concat([st.session_state["shelters"],
+            pd.DataFrame([{"lat":lat,"lon":lon,"name":nm}])
+        ],ignore_index=True)
 if st.sidebar.button("リセット"):
     st.session_state["shelters"]=load_initial_geojson()
     st.session_state["road_path"]=[]
     st.session_state["route"]=[]
     st.session_state["label_col"]="name"
-csvout=st.session_state["shelters"].to_csv(index=False)
-st.sidebar.download_button("CSVダウンロード",csvout,"shelters.csv","text/csv")
+download = st.session_state["shelters"].to_csv(index=False)
+st.sidebar.download_button("CSVダウンロード",download,"shelters.csv","text/csv")
 
 with st.sidebar.form("tsp"):
     st.markdown("---")
@@ -205,58 +192,117 @@ with st.sidebar.form("tsp"):
     st.session_state["ox_mode"]="drive" if "車" in md else "walk"
     calc_btn=st.form_submit_button("計算スタート")
 
-# ── メイン：選択 & 経路計算 & 地図表示 ─────────────────────────
-df=st.session_state["shelters"].copy()
+# ── メイン画面：選択→計算→地図表示 ─────────────────────────────────
+df = st.session_state["shelters"].copy()
 df["lat"]=pd.to_numeric(df["lat"],errors="coerce")
 df["lon"]=pd.to_numeric(df["lon"],errors="coerce")
-labels=[c for c in df.columns if df[c].dtype=="O"]
-if not labels: labels=["name"]
-st.session_state["label_col"]=st.selectbox("ラベル列",labels,index=labels.index(st.session_state["label_col"]))
-display=[f"{r[st.session_state['label_col']]}({r['lat']:.5f},{r['lon']:.5f})" for _,r in df.iterrows()]
-idx_map={i:n for i,n in enumerate(display)}
-st.markdown("<span style='font-size:14px;'>📋 巡回施設の選択</span>",unsafe_allow_html=True)
-sel=st.multiselect("選択",options=list(idx_map),format_func=lambda x:idx_map[x],key="sel")
+
+# ラベル列選択
+label_opts=[c for c in df.columns if df[c].dtype=="O"]
+if not label_opts: label_opts=["name"]
+st.session_state["label_col"] = st.selectbox(
+    "ラベル列", label_opts,
+    index=label_opts.index(st.session_state["label_col"])
+)
+
+# 地図スタイル辞書
+map_style_dict = {
+    "light": "light",
+    "dark": "dark",
+    "ストリート": "mapbox://styles/mapbox/streets-v12",
+    "衛星写真": "mapbox://styles/mapbox/satellite-streets-v12",
+    "アウトドア": "mapbox://styles/mapbox/outdoors-v12",
+    "ナビ風": "mapbox://styles/mapbox/navigation-night-v1"
+}
+# 地図背景スタイル選択
+st.session_state["map_style"] = st.selectbox(
+    "地図背景スタイル", list(map_style_dict.keys()),
+    index=list(map_style_dict.keys()).index(st.session_state["map_style"])
+)
+
+# 巡回施設選択
+display = [f"{r[st.session_state['label_col']]}({r['lat']:.5f},{r['lon']:.5f})"
+           for _,r in df.iterrows()]
+idx_map = {i:name for i,name in enumerate(display)}
+st.markdown("<span style='font-size:14px;'>📋 巡回施設の選択</span>", unsafe_allow_html=True)
+sel = st.multiselect(
+    "選択", options=list(idx_map),
+    format_func=lambda x: idx_map[x],
+    key="sel"
+)
+
+# 計算実行
 if calc_btn:
     if len(sel)<2:
         st.warning("2か所以上選択してください")
     else:
-        sub=df.iloc[sel].reset_index(drop=True)
-        locs=list(zip(sub["lat"],sub["lon"]))
+        sub = df.iloc[sel].reset_index(drop=True)
+        locs = list(zip(sub["lat"], sub["lon"]))
         with st.spinner("計算中…"):
-            distmat,G,node_ids=create_road_distance_matrix(locs,mode=st.session_state["ox_mode"])
-            route=solve_tsp(distmat)
-            st.session_state["route"]=[sel[i] for i in route if i<len(sel)]
-            # 経路描画用座標
-            path=[]
+            distmat, G, node_ids = create_road_distance_matrix(locs, mode=st.session_state["ox_mode"])
+            route = solve_tsp(distmat)
+            st.session_state["route"] = [sel[i] for i in route if i < len(sel)]
+            # 経路描画座標
+            path = []
             if G and node_ids:
                 for i in range(len(route)-1):
-                    seg=nx.shortest_path(G,node_ids[route[i]],node_ids[route[i+1]],weight="length")
-                    coords=[[G.nodes[n]["x"],G.nodes[n]["y"]] for n in seg]
-                    path+=coords if i==0 else coords[1:]
+                    seg = nx.shortest_path(G, node_ids[route[i]], node_ids[route[i+1]], weight="length")
+                    coords = [[G.nodes[n]["x"], G.nodes[n]["y"]] for n in seg]
+                    path += coords if i==0 else coords[1:]
             else:
                 for i in range(len(route)-1):
-                    path.append([sub.loc[route[i],"lon"],sub.loc[route[i],"lat"]])
-                    path.append([sub.loc[route[i+1],"lon"],sub.loc[route[i+1],"lat"]])
-            st.session_state["road_path"]=path
-            total=sum(distmat[route[i],route[i+1]] for i in range(len(route)-1) if route[i]<len(distmat) and route[i+1]<len(distmat))
+                    path.append([sub.loc[route[i],"lon"], sub.loc[route[i],"lat"]])
+                    path.append([sub.loc[route[i+1],"lon"], sub.loc[route[i+1],"lat"]])
+            st.session_state["road_path"] = path
+            total = sum(distmat[route[i],route[i+1]] for i in range(len(route)-1))
             st.success(f"計算完了！総距離: {total:.2f} km")
 
-# 地図
-st.markdown("<span style='font-size:14px;'>🗺️ 地図（ラベル＋TSPルート）</span>",unsafe_allow_html=True)
-layer_pts=pdk.Layer("ScatterplotLayer",data=df,get_position='[lon,lat]',get_color='[0,150,255,200]',get_radius=40,radius_min_pixels=1,radius_max_pixels=6,pickable=True)
-layer_text=pdk.Layer("TextLayer",data=df,get_position='[lon,lat]',get_text=st.session_state["label_col"],get_size=15,get_color=[20,20,40,180],get_alignment_baseline="'bottom'",pickable=False)
-layers=[layer_pts,layer_text]
-rp=st.session_state["road_path"]
+# ── 地図描画 ─────────────────────────────────────────────────────
+st.markdown("<span style='font-size:14px;'>🗺️ 地図（ラベル＋TSPルート）</span>", unsafe_allow_html=True)
+
+layer_pts = pdk.Layer(
+    "ScatterplotLayer", data=df,
+    get_position='[lon,lat]', get_color='[0,150,255,200]',
+    get_radius=40, radius_min_pixels=1, radius_max_pixels=6,
+    pickable=True
+)
+layer_text = pdk.Layer(
+    "TextLayer", data=df,
+    get_position='[lon,lat]',
+    get_text=st.session_state["label_col"],
+    get_size=15, get_color=[20,20,40,180],
+    get_alignment_baseline="'bottom'", pickable=False
+)
+layers = [layer_pts, layer_text]
+rp = st.session_state["road_path"]
 if rp and len(rp)>1:
-    layers.append(pdk.Layer("PathLayer",data=pd.DataFrame({"path":[rp]}),get_path="path",get_color=[255,60,60,200],width_scale=10,width_min_pixels=4, pickable=False))
-view=pdk.ViewState(latitude=KAMIJIMA_CENTER[0],longitude=KAMIJIMA_CENTER[1],zoom=13.3,pitch=45,bearing=0)
-st.pydeck_chart(pdk.Deck(map_style=map_style_dict[st.session_state["map_style"]],layers=layers,initial_view_state=view,tooltip={"text":f"{{{st.session_state['label_col']}}}"}),use_container_width=True)
+    layers.append(pdk.Layer(
+        "PathLayer", data=pd.DataFrame({"path":[rp]}),
+        get_path="path", get_color=[255,60,60,200],
+        width_scale=10, width_min_pixels=4, pickable=False
+    ))
+view = pdk.ViewState(
+    latitude=KAMIJIMA_CENTER[0], longitude=KAMIJIMA_CENTER[1],
+    zoom=13.3, pitch=45, bearing=0
+)
+st.pydeck_chart(
+    pdk.Deck(
+        map_style=map_style_dict[st.session_state["map_style"]],
+        layers=layers,
+        initial_view_state=view,
+        tooltip={"text": f"{{{st.session_state['label_col']}}}"}
+    ),
+    use_container_width=True
+)
 
 # データ一覧 expander
 if not df.empty:
     with st.expander("📋 避難所一覧・巡回順"):
         st.dataframe(df)
         if st.session_state["route"]:
-            st.write("巡回順:",[df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]])
+            st.write(
+                "巡回順:",
+                [df.iloc[i][st.session_state["label_col"]] for i in st.session_state["route"]]
+            )
 else:
     st.info("避難所データがありません")
