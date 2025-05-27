@@ -6,7 +6,6 @@ import numpy as np
 import pydeck as pdk
 import networkx as nx
 import osmnx as ox
-import packaging.version
 from math import radians, sin, cos, sqrt, atan2
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
@@ -59,14 +58,18 @@ def create_road_distance_matrix(locs, mode="drive"):
     pad = 0.03
     north, south = max(lat for lat, _ in locs) + pad, min(lat for lat, _ in locs) - pad
     east, west = max(lon for _, lon in locs) + pad, min(lon for _, lon in locs) - pad
-    G = ox.graph_from_bbox(north, south, east, west, network_type=mode)
+    G = ox.graph_from_bbox(bbox=(north, south, east, west), network_type=mode)
+
     nodes = [ox.nearest_nodes(G, lon, lat) for lat, lon in locs]
     n = len(nodes)
     mat = np.zeros((n, n))
     for i in range(n):
         for j in range(n):
             if i != j:
-                mat[i, j] = nx.shortest_path_length(G, nodes[i], nodes[j], weight="length") / 1000
+                try:
+                    mat[i, j] = nx.shortest_path_length(G, nodes[i], nodes[j], weight="length") / 1000
+                except nx.NetworkXNoPath:
+                    mat[i, j] = haversine(locs[i][0], locs[i][1], locs[j][0], locs[j][1])
     return mat, G, nodes
 
 @st.cache_data
@@ -111,7 +114,6 @@ if st.sidebar.button("最短経路計算"):
     total_distance = sum(dist_mat[route[i], route[i+1]] for i in range(len(route)-1))
     st.sidebar.success(f"総距離: {total_distance:.2f} km")
 
-    # Display route on map
     path_coords = [[locs[i][1], locs[i][0]] for i in route]
     layer = pdk.Layer("PathLayer", data=[{"path": path_coords}], get_path="path", get_color=[255, 0, 0], width_scale=20, width_min_pixels=3)
     view_state = pdk.ViewState(latitude=DEFAULT_CENTER[0], longitude=DEFAULT_CENTER[1], zoom=13)
