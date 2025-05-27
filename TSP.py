@@ -94,7 +94,6 @@ def solve_tsp(dist_mat):
         route.append(route[0])
     return route
 
-# Session states
 if "shelters" not in st.session_state:
     st.session_state.shelters = load_initial_geojson()
 
@@ -104,19 +103,22 @@ if uploaded_files:
     if not df_new.empty:
         st.session_state.shelters = pd.concat([st.session_state.shelters, df_new], ignore_index=True)
 
-st.sidebar.header("経路計算")
 mode = st.sidebar.selectbox("移動手段", ["drive", "walk"], format_func=lambda x: {"drive": "自動車", "walk": "徒歩"}[x])
 
 if st.sidebar.button("最短経路計算"):
     locs = list(zip(st.session_state.shelters.lat, st.session_state.shelters.lon))
     dist_mat, G, nodes = create_road_distance_matrix(locs, mode)
     route = solve_tsp(dist_mat)
-    total_distance = sum(dist_mat[route[i], route[i+1]] for i in range(len(route)-1))
-    st.sidebar.success(f"総距離: {total_distance:.2f} km")
 
-    path_coords = [[locs[i][1], locs[i][0]] for i in route]
-    layer = pdk.Layer("PathLayer", data=[{"path": path_coords}], get_path="path", get_color=[255, 0, 0], width_scale=20, width_min_pixels=3)
-    view_state = pdk.ViewState(latitude=DEFAULT_CENTER[0], longitude=DEFAULT_CENTER[1], zoom=13)
-    st.pydeck_chart(pdk.Deck(initial_view_state=view_state, layers=[layer]))
+    route_coords = [[locs[i][1], locs[i][0]] for i in route]
+    view_state = pdk.ViewState(latitude=np.mean([lat for lat, _ in locs]), longitude=np.mean([lon for _, lon in locs]), zoom=13)
+
+    st.pydeck_chart(pdk.Deck(
+        initial_view_state=view_state,
+        layers=[
+            pdk.Layer("ScatterplotLayer", data=st.session_state.shelters, get_position="[lon,lat]", get_radius=50, get_color=[255,0,0]),
+            pdk.Layer("PathLayer", data=[{"path": route_coords}], get_path="path", width_scale=10, width_min_pixels=3, get_color=[0,255,0])
+        ]
+    ))
 
 st.dataframe(st.session_state.shelters)
