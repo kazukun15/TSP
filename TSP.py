@@ -17,7 +17,7 @@ DEFAULT_CENTER = (34.25754417840102, 133.20446981161595)
 st.set_page_config(page_title="避難所最短ルート探すくん", layout="wide")
 st.title("🏫 避難所最短ルート探すくん")
 
-# ===== Utility Functions =====
+# Utility Functions
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
     φ1, λ1, φ2, λ2 = map(radians, [lat1, lon1, lat2, lon2])
@@ -39,9 +39,9 @@ def load_initial_geojson():
 
 @st.cache_data
 def file_to_df(files):
+    f = files[0]
+    ext = f.name.split('.')[-1].lower()
     try:
-        f = files[0]
-        ext = f.name.split('.')[-1].lower()
         if ext in ["shp", "geojson", "json"]:
             gdf = gpd.read_file(f).to_crs(EPSG_WGS84)
             gdf = gdf[gdf.geometry.type == "Point"].copy()
@@ -65,10 +65,8 @@ def file_to_df(files):
 @st.cache_data
 def create_road_distance_matrix(locs, mode="drive"):
     pad = 0.03
-    north = max(lat for lat, _ in locs) + pad
-    south = min(lat for lat, _ in locs) - pad
-    east  = max(lon for _, lon in locs) + pad
-    west  = min(lon for _, lon in locs) - pad
+    north, south = max(lat for lat, _ in locs) + pad, min(lat for lat, _ in locs) - pad
+    east, west = max(lon for _, lon in locs) + pad, min(lon for _, lon in locs) - pad
     G = ox.graph_from_bbox(bbox=(north, south, east, west), network_type=mode)
     nodes = [ox.nearest_nodes(G, lon, lat) for lat, lon in locs]
     n = len(nodes)
@@ -104,8 +102,7 @@ def solve_tsp(dist_mat):
         route.append(route[0])
     return route
 
-# ===== Main App =====
-# Load or initialize shelters
+# Main App
 if "shelters" not in st.session_state:
     st.session_state.shelters = load_initial_geojson()
 
@@ -117,56 +114,42 @@ if uploaded:
         st.session_state.shelters = pd.concat([st.session_state.shelters, df_new], ignore_index=True)
         st.sidebar.success(f"{len(df_new)}件追加されました")
 
-# Sidebar: Select mode and shelters
+# Sidebar: Select mode
 mode = st.sidebar.selectbox("移動手段を選択", ["drive","walk"], format_func=lambda x: {"drive":"自動車","walk":"徒歩"}[x])
+
+# Sidebar: Select shelters by name list
+names = st.session_state.shelters["name"].tolist()
 choices = st.sidebar.multiselect(
-    "巡回対象の避難所を選択",
-    options=list(range(len(st.session_state.shelters))),
-    format_func=lambda i: st.session_state.shelters.loc[i, 'name'],
-    help="2つ以上選択してください"
+    "巡回対象の避難所を選択 (2つ以上)",
+    options=names,
+    help="名前をクリックして選択できます"
 )
 
-# Calculate route
 if st.sidebar.button("最短経路を計算"):
     if len(choices) < 2:
         st.sidebar.warning("2つ以上の避難所を選択してください")
     else:
-        df_sel = st.session_state.shelters.loc[choices].reset_index(drop=True)
+        df_sel = st.session_state.shelters[st.session_state.shelters["name"].isin(choices)].reset_index(drop=True)
         locs = list(zip(df_sel['lat'], df_sel['lon']))
         dist_mat, G = create_road_distance_matrix(locs, mode)
         route = solve_tsp(dist_mat)
-        # Compute distance
         total = sum(dist_mat[route[i], route[i+1]] for i in range(len(route)-1))
         st.sidebar.success(f"総距離: {total:.2f} km")
-        # Prepare map layers
+
+        # Map
         route_coords = [[locs[i][1], locs[i][0]] for i in route]
         center_lat = df_sel['lat'].mean()
         center_lon = df_sel['lon'].mean()
         view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=13, pitch=45)
         layers = [
-            pdk.Layer(
-                "ScatterplotLayer", data=df_sel,
-                get_position='[lon,lat]', get_radius=100,
-                get_color=[255, 69, 0], pickable=True
-            ),
-            pdk.Layer(
-                "PathLayer", data=[{"path": route_coords}],
-                get_path='path', width_scale=20, width_min_pixels=4,
-                get_color=[30, 144, 255], cap_style="round", joint_style="round"
-            )
+            pdk.Layer("ScatterplotLayer", data=df_sel, get_position='[lon,lat]', get_radius=100,
+                      get_color=[255,69,0], pickable=True),
+            pdk.Layer("PathLayer", data=[{"path": route_coords}], get_path='path', width_scale=20,
+                      width_min_pixels=4, get_color=[30,144,255], cap_style="round", joint_style="round")
         ]
-        st.pydeck_chart(pdk.Deck(
-            initial_view_state=view,
-            map_style='mapbox://styles/mapbox/streets-v11',
-            layers=layers,
-            tooltip={"text":"{name}"}
-        ))
+        st.pydeck_chart(pdk.Deck(initial_view_state=view, map_style='mapbox://styles/mapbox/streets-v11', layers=layers,
+                                 tooltip={"text":"{name}"}))
 
-# Show table of shelters
+# Show table
 st.header("避難所一覧")
 st.dataframe(st.session_state.shelters)
-
-# Optionally show selected order
-if 'route' in locals() and route:
-    order = [df_sel.loc[idx, 'name'] for idx in route]
-    st.write("巡回順:", order)
